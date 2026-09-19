@@ -78,4 +78,4 @@ def write_convolve_vectors(path, rng, n):
             result_bits = int_to_twos_complement(result, 20)
             f.write(f"{pixel_bits} {weight_bits} {result_bits}\n")
 
-write_convolve_vectors("tb/vectors/convolve_vectors.txt", random.Random(SEED), 10000)
+write_convolve_vectors("tb/vectors/convolve_vectors.txt", random.Random(SEED), 100000)
