@@ -11,7 +11,8 @@
 `define _QUANTIZED_CONVOLUTION_SV_
 
 module quantized_convolution #(
-    parameter int   M_BITS = 20,
+    parameter int   M_BITS  = 20,
+    parameter logic RELU_ON = 1,
     parameter logic        [5:0]        N     = 6'd10,
     parameter logic signed [7:0]        SHIFT = 8'sd1,
     parameter logic signed [M_BITS-1:0] M     = M_BITS'(10)
@@ -31,10 +32,11 @@ module quantized_convolution #(
     );
 
     quantized_scale #(
-        .M_BITS (M_BITS),
-        .M      (M),
-        .N      (N),
-        .SHIFT  (SHIFT)
+        .M_BITS  (M_BITS),
+        .M       (M),
+        .N       (N),
+        .SHIFT   (SHIFT),
+        .RELU_ON (RELU_ON)
     ) quantize
     (
         .convolution           (unquantized_value),
