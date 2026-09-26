@@ -24,7 +24,7 @@ module convolve_3x3
 
         for (int i = 0; i < 9; i++) begin
             intermediate_product[i] = $signed({1'b0, pixels[i]}) * weights[i];
-            convolution = convolution + intermediate_product[i];
+            convolution = convolution + 20'(intermediate_product[i]);
         end
     end
 
