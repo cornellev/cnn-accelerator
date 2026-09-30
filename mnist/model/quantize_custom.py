@@ -50,8 +50,11 @@ class ConvRelu2d(nn.Module):
         return self.relu(self.conv(inputs))
 
 
-def fuse_conv_relu(m: torch.nn.Module) -> fx.GraphModule:
-    gm = fx.symbolic_trace(m)
+def fuse_conv_relu(
+    m: torch.nn.Module, tracer_class: type = fx.Tracer
+) -> fx.GraphModule:
+    graph = tracer_class().trace(m)
+    gm = torch.fx.GraphModule(m, graph)
     modules = dict(m.named_modules())
 
     for conv_node in gm.graph.nodes:
@@ -84,6 +87,66 @@ def fuse_conv_relu(m: torch.nn.Module) -> fx.GraphModule:
         gm.graph.erase_node(conv_node)
 
     # Check graph is still well-formed after transform
+    gm.graph.lint()
+    gm.recompile()
+
+    return gm
+
+
+class QuantizationMarker(nn.Module):
+    def __init__(self, dim: tuple[int, ...] | None = None) -> None:
+        super().__init__()
+        self.dim = dim
+        self.register_buffer("min", None)
+        self.register_buffer("max", None)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        # TODO: quantiles
+        current_min = torch.amin(input, dim=self.dim).detach()
+        current_max = torch.amax(input, dim=self.dim).detach()
+
+        if self.min is None:
+            self.min = current_min
+        else:
+            self.min = torch.minimum(self.min, current_min)
+        if self.max is None:
+            self.max = current_max
+        else:
+            self.max = torch.maximum(self.max, current_max)
+
+        return input
+
+
+def insert_quantization_markers(
+    m: torch.nn.Module, tracer_class: type = fx.Tracer
+) -> fx.GraphModule:
+    graph = tracer_class().trace(m)
+    gm = fx.GraphModule(m, graph)
+    modules = dict(gm.named_modules())
+
+    # Max pooling does not need a separate quantization boundary: it can operate
+    # using the scale and zero point of the activation that feeds it.
+    skipped_module_types = (nn.MaxPool2d,)
+
+    for node in list(gm.graph.nodes):
+        if node.op == "call_module":
+            module = modules[cast(str, node.target)]
+            if isinstance(module, skipped_module_types):
+                continue
+        elif node.op != "placeholder":
+            continue
+
+        marker_name = f"quantization_marker_{node.name}"
+        gm.add_module(marker_name, QuantizationMarker())
+
+        # Capture the existing users first so the marker does not get rewritten
+        # to consume its own output.
+        users = list(node.users)
+        with gm.graph.inserting_after(node):
+            marker_node = gm.graph.call_module(marker_name, args=(node,))
+        for user in users:
+            user.replace_input_with(node, marker_node)
+
     gm.graph.lint()
     gm.recompile()
 
