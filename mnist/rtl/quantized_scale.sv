@@ -33,7 +33,7 @@ module quantized_scale #(
 
     always_comb begin
         relu_value   = (RELU_ON && (convolution < 0)) ? '0 : convolution;
-        scaled_value = SHIFT + ((M * relu_value) >>> N);
+        scaled_value = (M_BITS + 20)'(SHIFT) + ((M * relu_value) >>> N);
 
         if (scaled_value > 127) begin
             quantized_convolution =  8'sd127;
