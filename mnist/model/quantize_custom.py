@@ -213,25 +213,33 @@ class QuantizedLinear(nn.Module):
         super().__init__()
         self.weights = weights
 
-        correction = torch.sum(weights.type(torch.int32), dim=1) * x_zero
-        self.full_bias = correction + bias
+        correction = torch.sum(
+            weights.type(torch.int32), dim=1, dtype=torch.int32
+        ) * x_zero
+        self.full_bias = bias - correction
 
         final_scale = (w_scale * x_scale) / y_scale
-        self.approx_m = torch.round(
-            final_scale * (2**QuantizedLinear.SCALE_APPROX_BITS)
-        ).type(torch.int32)
-        assert torch.all((INT32_MIN <= self.approx_m) & (self.approx_m <= INT32_MAX))
+        approx_m = torch.round(final_scale * (2**QuantizedLinear.SCALE_APPROX_BITS))
+        assert torch.all((0 <= approx_m) & (approx_m <= INT32_MAX))
+        self.approx_m = approx_m.type(torch.int32)
 
         self.y_zero = y_zero
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         int32_accum = (
-            self.weights.type(torch.int32) @ x.type(torch.int32) + self.full_bias
+            torch.matmul(
+                x.type(torch.int32), self.weights.type(torch.int32).transpose(0, 1)
+            )
+            + self.full_bias
         )
-        scaled = (self.approx_m * int32_accum) >> QuantizedLinear.SCALE_APPROX_BITS
-        requantized = (
-            torch.clip(scaled, INT8_MIN, INT8_MAX).type(torch.int8) + self.y_zero
+
+        m_accum = self.approx_m.type(torch.int64) * int32_accum.type(torch.int64)
+        rounding_bit = (m_accum >> (QuantizedLinear.SCALE_APPROX_BITS - 1)) & 1
+        scaled = (m_accum >> QuantizedLinear.SCALE_APPROX_BITS) + rounding_bit
+        requantized = torch.clip(scaled + self.y_zero, INT8_MIN, INT8_MAX).type(
+            torch.int8
         )
+
         return requantized
 
 
@@ -251,14 +259,24 @@ class QuantizedConvRelu2d(nn.Module):
         super().__init__()
         self.weights = weights
 
-        correction = torch.sum(weights.type(torch.int32), dim=(1, 2, 3)) * x_zero
+        kernel_h = weights.size(2)
+        kernel_w = weights.size(3)
+        assert kernel_h % 2 == 1 and kernel_w % 2 == 1, (
+            "only odd convolution kernel dimensions are supported"
+        )
+
+        correction = (
+            torch.sum(weights.type(torch.int32), dim=(1, 2, 3), dtype=torch.int32)
+            * x_zero
+        )
         self.full_bias = bias - correction
 
         final_scale = (w_scale * x_scale) / y_scale
-        self.approx_m = torch.round(
-            final_scale * (2**QuantizedLinear.SCALE_APPROX_BITS)
-        ).type(torch.int32)
-        assert torch.all((INT32_MIN <= self.approx_m) & (self.approx_m <= INT32_MAX))
+        approx_m = torch.round(
+            final_scale * (2**QuantizedConvRelu2d.SCALE_APPROX_BITS)
+        )
+        assert torch.all((0 <= approx_m) & (approx_m <= INT32_MAX))
+        self.approx_m = approx_m.type(torch.int32)
 
         self.x_zero = x_zero
         self.y_zero = y_zero
@@ -302,9 +320,9 @@ class QuantizedConvRelu2d(nn.Module):
 
         expanded_approx_m = self.approx_m.reshape(-1, 1, 1)
 
-        m_relu = expanded_approx_m * relu
-        rounding_bit = (m_relu >> (QuantizedLinear.SCALE_APPROX_BITS - 1)) & 1
-        scaled = (m_relu >> QuantizedLinear.SCALE_APPROX_BITS) + rounding_bit
+        m_relu = expanded_approx_m.type(torch.int64) * relu.type(torch.int64)
+        rounding_bit = (m_relu >> (QuantizedConvRelu2d.SCALE_APPROX_BITS - 1)) & 1
+        scaled = (m_relu >> QuantizedConvRelu2d.SCALE_APPROX_BITS) + rounding_bit
         requantized = torch.clip(scaled + self.y_zero, INT8_MIN, INT8_MAX).type(
             torch.int8
         )

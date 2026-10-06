@@ -16,6 +16,55 @@ def random_uniform(low, high, size=(), *, generator, dtype=torch.float64):
 
 
 class QuantizedConvolutionTestCase(unittest.TestCase):
+    def test_rejects_even_kernel_dimensions(self):
+        bias = torch.tensor([0], dtype=torch.int32)
+        w_scale = torch.tensor([0.5])
+        x_scale = torch.tensor(1.0)
+        x_zero = torch.tensor(0, dtype=torch.int8)
+        y_scale = torch.tensor(1.0)
+        y_zero = torch.tensor(0, dtype=torch.int8)
+
+        for kernel_h, kernel_w in ((2, 3), (3, 2)):
+            with self.subTest(kernel_h=kernel_h, kernel_w=kernel_w):
+                weights = torch.ones(
+                    (1, 1, kernel_h, kernel_w), dtype=torch.int8
+                )
+                with self.assertRaises(AssertionError):
+                    QuantizedConvRelu2d(
+                        weights=weights,
+                        bias=bias,
+                        w_scale=w_scale,
+                        x_scale=x_scale,
+                        x_zero=x_zero,
+                        y_scale=y_scale,
+                        y_zero=y_zero,
+                    )
+
+    def test_requantization_multiply_does_not_overflow_int32(self):
+        weights = torch.tensor([[[[1]]]], dtype=torch.int8)
+        bias = torch.tensor([0], dtype=torch.int32)
+        w_scale = torch.tensor([0.5])
+        x_scale = torch.tensor(1.0)
+        x_zero = torch.tensor(0, dtype=torch.int8)
+        y_scale = torch.tensor(1.0)
+        y_zero = torch.tensor(0, dtype=torch.int8)
+
+        layer = QuantizedConvRelu2d(
+            weights=weights,
+            bias=bias,
+            w_scale=w_scale,
+            x_scale=x_scale,
+            x_zero=x_zero,
+            y_scale=y_scale,
+            y_zero=y_zero,
+        )
+        image = torch.tensor([[[[4]]]], dtype=torch.int8)
+
+        actual = layer(image)
+        expected = torch.tensor([[[[2]]]], dtype=torch.int8)
+
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_zero_input_gets_zero_point(self):
         kernel = torch.tensor(
             [
@@ -295,3 +344,148 @@ class QuantizedConvolutionTestCase(unittest.TestCase):
         )
 
         return convolved, expected
+
+
+# ngl chat wrote these tests so I haven't looked at them too much
+# i mostly wrote the ones above though
+class QuantizedLinearTestCase(unittest.TestCase):
+    def test_zero_input_gets_quantized_bias(self):
+        weights = torch.tensor([[2, -3, 5], [-7, 11, 13]], dtype=torch.int8)
+        x_zero = torch.tensor(-17, dtype=torch.int8)
+        y_zero = torch.tensor(23, dtype=torch.int8)
+        bias = torch.tensor([8, -12], dtype=torch.int32)
+        w_scale = torch.tensor([0.25, 0.125])
+        x_scale = torch.tensor(0.5)
+        y_scale = torch.tensor(1.0)
+        bias_scale = x_scale * w_scale
+        bias_zero = torch.tensor(0, dtype=torch.int32)
+
+        layer = QuantizedLinear(
+            weights=weights,
+            bias=bias,
+            w_scale=w_scale,
+            x_scale=x_scale,
+            x_zero=x_zero,
+            y_scale=y_scale,
+            y_zero=y_zero,
+        )
+        self.assertEqual(layer.full_bias.dtype, torch.int32)
+
+        inputs = torch.full((4, 3), x_zero, dtype=torch.int8)
+        actual = layer(inputs)
+        expected = quantize(
+            dequantize(bias, bias_scale, bias_zero),
+            y_scale,
+            y_zero,
+        ).expand(4, -1)
+
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_supports_vector_and_leading_batch_dimensions(self):
+        layer = QuantizedLinear(
+            weights=torch.tensor([[1, 2, 3], [-4, 5, -6]], dtype=torch.int8),
+            bias=torch.tensor([10, -20], dtype=torch.int32),
+            w_scale=torch.tensor([0.25, 0.125]),
+            x_scale=torch.tensor(0.5),
+            x_zero=torch.tensor(3, dtype=torch.int8),
+            y_scale=torch.tensor(1.0),
+            y_zero=torch.tensor(-4, dtype=torch.int8),
+        )
+        inputs = torch.tensor(
+            [[[3, 3, 3], [4, 5, 6]], [[-2, 7, 9], [10, -11, 12]]],
+            dtype=torch.int8,
+        )
+
+        batched = layer(inputs)
+        self.assertEqual(batched.shape, (2, 2, 2))
+        individual = torch.stack(
+            [torch.stack([layer(vector) for vector in batch]) for batch in inputs]
+        )
+        torch.testing.assert_close(batched, individual, rtol=0, atol=0)
+
+    def test_output_zero_point_is_added_before_saturation(self):
+        layer = QuantizedLinear(
+            weights=torch.tensor([[127]], dtype=torch.int8),
+            bias=torch.tensor([0], dtype=torch.int32),
+            w_scale=torch.tensor([0.5]),
+            x_scale=torch.tensor(1.0),
+            x_zero=torch.tensor(0, dtype=torch.int8),
+            y_scale=torch.tensor(1.0),
+            y_zero=torch.tensor(100, dtype=torch.int8),
+        )
+
+        inputs = torch.tensor([[127], [-128]], dtype=torch.int8)
+        actual = layer(inputs)
+        expected = torch.tensor([[INT8_MAX], [INT8_MIN]], dtype=torch.int8)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_matches_requantized_float_linear(self):
+        generator = torch.Generator().manual_seed(2087)
+
+        for case in range(100):
+            with self.subTest(case=case):
+                batch_shape = (2, 3)
+                in_features = 7
+                out_features = 5
+                x_scale = 10 ** random_uniform(-3, 0, generator=generator)
+                w_scale = 10 ** random_uniform(
+                    -4, -1, (out_features,), generator=generator
+                )
+                max_multiplier = 10 ** random_uniform(-5.05, -0.05, generator=generator)
+                y_scale = x_scale * w_scale.max() / max_multiplier
+                x_zero = torch.randint(
+                    INT8_MIN, INT8_MAX + 1, (), generator=generator, dtype=torch.int8
+                )
+                y_zero = torch.randint(
+                    INT8_MIN, INT8_MAX + 1, (), generator=generator, dtype=torch.int8
+                )
+                inputs_q = torch.randint(
+                    INT8_MIN,
+                    INT8_MAX + 1,
+                    (*batch_shape, in_features),
+                    generator=generator,
+                    dtype=torch.int8,
+                )
+                weights_q = torch.randint(
+                    INT8_MIN,
+                    INT8_MAX + 1,
+                    (out_features, in_features),
+                    generator=generator,
+                    dtype=torch.int8,
+                )
+                bias_q = torch.randint(
+                    -8000, 8001, (out_features,), generator=generator, dtype=torch.int32
+                )
+                weight_zero = torch.tensor(0, dtype=torch.int8)
+                bias_zero = torch.tensor(0, dtype=torch.int32)
+
+                inputs_dq = dequantize(inputs_q, x_scale, x_zero)
+                weights_dq = dequantize(
+                    weights_q,
+                    w_scale.reshape(-1, 1),
+                    weight_zero,
+                )
+                bias_scale = x_scale * w_scale
+                bias_dq = dequantize(bias_q, bias_scale, bias_zero)
+                expected = quantize(
+                    torch.nn.functional.linear(inputs_dq, weights_dq, bias_dq),
+                    y_scale,
+                    y_zero,
+                )
+
+                layer = QuantizedLinear(
+                    weights=weights_q,
+                    bias=bias_q,
+                    w_scale=w_scale,
+                    x_scale=x_scale,
+                    x_zero=x_zero,
+                    y_scale=y_scale,
+                    y_zero=y_zero,
+                )
+                actual = layer(inputs_q)
+
+                self.assertEqual(actual.dtype, torch.int8)
+                self.assertEqual(actual.shape, expected.shape)
+                torch.testing.assert_close(
+                    actual.to(torch.int32), expected.to(torch.int32), rtol=0, atol=1
+                )
