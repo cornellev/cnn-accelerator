@@ -1,5 +1,6 @@
 import math 
 import random
+from pathlib import Path
 
 SEED = 1
 CONVOLUTION_NUM_ELEMENTS = 9
@@ -66,6 +67,29 @@ def generate_vectors(rng, n):
 
     return pixels_list, weights_list
 
+def quantized_scale(M, N, SHIFT, unquantized_sum_list):
+
+    quantized_sum_list = []
+
+    for i in range(0, len(unquantized_sum_list)):
+        if (unquantized_sum_list[i] > 0):
+            relu_value = unquantized_sum_list[i]
+        else:
+            relu_value = 0
+
+        scaled_value = SHIFT + ((M * relu_value) >> N)
+
+        if (scaled_value > 127):
+            quantized_result =  127
+        elif (scaled_value < -128):
+            quantized_result = -128
+        else: 
+            quantized_result = scaled_value
+
+        quantized_sum_list.append(int_to_twos_complement(quantized_result, 8))
+
+    return quantized_sum_list
+
 def write_convolve_vectors(path, rng, n):
     pixels_list, weights_list = generate_vectors(rng, n)
     sum_list = convolve(pixels_list, weights_list)
@@ -78,4 +102,21 @@ def write_convolve_vectors(path, rng, n):
             result_bits = int_to_twos_complement(result, 20)
             f.write(f"{pixel_bits} {weight_bits} {result_bits}\n")
 
-write_convolve_vectors("tb/vectors/convolve_vectors.txt", random.Random(SEED), 100000)
+def write_quantized_convolve_vectors(path, rng, n):
+    pixels_list, weights_list = generate_vectors(rng, n)
+    unquantized_sum_list = convolve(pixels_list, weights_list)
+    quantized_sum_list = quantized_scale(10, 10, 1, unquantized_sum_list)
+
+    with open(path, "w") as f:
+        for pixels, weights, result in zip(pixels_list, weights_list, quantized_sum_list):
+            # Joins together all pixel bits and then the weight bits so tb can read easily
+            pixel_bits = "".join(f"{pixel:08b}" for pixel in pixels)
+            weight_bits = "".join(f"{weight:08b}" for weight in weights)
+            result_bits = result
+            f.write(f"{pixel_bits} {weight_bits} {result_bits}\n")
+
+if __name__ == "__main__":
+    vectors_dir = Path(__file__).resolve().parent.parent / "tb" / "vectors"
+    vectors_dir.mkdir(parents=True, exist_ok=True)
+    write_convolve_vectors(vectors_dir / "convolve_vectors.txt", random.Random(SEED), 100000)
+    write_quantized_convolve_vectors(vectors_dir / "quantized_convolve_vectors.txt", random.Random(SEED), 100000)
