@@ -178,10 +178,26 @@ def dequantize(values: torch.Tensor, scale: torch.Tensor, zero: torch.Tensor):
 
 def quantize_weights(
     weights: torch.Tensor,
-    dim: tuple[int, ...] | None = None,
+    axis: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    min = torch.amin(weights, dim)
-    max = torch.amax(weights, dim)
+    """Symmetrically quantize weights per tensor or per channel.
+
+    `axis` follows the convention used by PyTorch's per-channel quantization
+    APIs. For example, `axis=0` produces one scale for each output channel in
+    a linear or convolution weight tensor. `axis=None` uses one scale for the
+    entire tensor.
+    """
+    if axis is None:
+        min = torch.amin(weights)
+        max = torch.amax(weights)
+    else:
+        if not 0 <= axis < weights.dim():
+            raise ValueError(f"axis must be between 0 and {weights.dim() - 1}")
+        reduce_dims = tuple(
+            dimension for dimension in range(weights.dim()) if dimension != axis
+        )
+        min = torch.amin(weights, dim=reduce_dims, keepdim=True)
+        max = torch.amax(weights, dim=reduce_dims, keepdim=True)
 
     # Symmetric quantization
     min = torch.minimum(min, -max)
@@ -190,11 +206,39 @@ def quantize_weights(
     quant_min = INT8_MIN
     quant_max = INT8_MAX
 
-    # TODO: test with dim
     scale = (max - min) / (quant_max - quant_min)
-    int_weights = quantize(weights, scale, torch.tensor(0))
+    # Mostly defensive, shouldn't happen in practice
+    scale = torch.where(scale == 0, torch.ones_like(scale), scale)
+
+    weight_zero = torch.tensor(0, dtype=torch.int8, device=weights.device)
+    int_weights = quantize(weights, scale, weight_zero)
+
+    if axis is not None:
+        scale = scale.reshape(weights.size(axis))
 
     return int_weights, scale
+
+
+def get_activation_quantization_params(
+    marker: QuantizationMarker,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if marker.min.numel() != 1 or marker.max.numel() != 1:
+        raise ValueError("only per-tensor activation quantization is supported")
+
+    # Stretch range to include 0 to avoid z being out of int8 range.
+    # See https://confluence.cornell.edu/spaces/cev/pages/767033389/On+Quantized+CNN+Inference
+    # for a brief explanation.
+    zero_float = torch.zeros((), dtype=marker.min.dtype, device=marker.min.device)
+    observed_min = torch.minimum(marker.min, zero_float)
+    observed_max = torch.maximum(marker.max, zero_float)
+
+    scale = (observed_max - observed_min) / (INT8_MAX - INT8_MIN)
+    if scale.item() == 0:
+        # I don't think this will happen at all in practice, just defensive (chat written)
+        scale = torch.ones_like(scale)
+
+    zero = torch.round(INT8_MIN - observed_min / scale).clamp(INT8_MIN, INT8_MAX)
+    return scale, zero.type(torch.int8)
 
 
 class QuantizedLinear(nn.Module):
@@ -213,9 +257,9 @@ class QuantizedLinear(nn.Module):
         super().__init__()
         self.weights = weights
 
-        correction = torch.sum(
-            weights.type(torch.int32), dim=1, dtype=torch.int32
-        ) * x_zero
+        correction = (
+            torch.sum(weights.type(torch.int32), dim=1, dtype=torch.int32) * x_zero
+        )
         self.full_bias = bias - correction
 
         final_scale = (w_scale * x_scale) / y_scale
@@ -272,9 +316,7 @@ class QuantizedConvRelu2d(nn.Module):
         self.full_bias = bias - correction
 
         final_scale = (w_scale * x_scale) / y_scale
-        approx_m = torch.round(
-            final_scale * (2**QuantizedConvRelu2d.SCALE_APPROX_BITS)
-        )
+        approx_m = torch.round(final_scale * (2**QuantizedConvRelu2d.SCALE_APPROX_BITS))
         assert torch.all((0 <= approx_m) & (approx_m <= INT32_MAX))
         self.approx_m = approx_m.type(torch.int32)
 
@@ -330,18 +372,149 @@ class QuantizedConvRelu2d(nn.Module):
         return requantized
 
 
+class QuantizeActivation(nn.Module):
+    """
+    Used to quantize activations before they enter the network so we can
+    still support a float32 interface. Not very important.
+    """
+
+    def __init__(self, scale: torch.Tensor, zero: torch.Tensor) -> None:
+        super().__init__()
+        self.scale = scale
+        self.zero = zero
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        return quantize(input, self.scale, self.zero)
+
+
+def quantize_layer_parameters(
+    weights: torch.Tensor,
+    bias: torch.Tensor | None,
+    x_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    int_weights, w_scale = quantize_weights(weights, axis=0)
+
+    if bias is None:
+        int_bias = torch.zeros(
+            weights.size(0), dtype=torch.int32, device=weights.device
+        )
+    else:
+        bias_zero = torch.tensor(0, dtype=torch.int32, device=bias.device)
+        int_bias = quantize32(bias, x_scale * w_scale, bias_zero)
+
+    return int_weights, int_bias, w_scale
+
+
 def quantize_calibrated(gm: fx.GraphModule) -> fx.GraphModule:
     """Quantizes an already-calibrated module"""
-    # TODO: finish this function
+    root = deepcopy(gm)
+    modules = dict(gm.named_modules())
     new_graph = fx.Graph()
     value_remap: dict[fx.Node, fx.Node] = {}
 
+    # Store quantization parameters for all activations so they can be referenced
+    # when constructing later modules.
+    qparams: dict[fx.Node, tuple[torch.Tensor, torch.Tensor]] = {}
+
+    def marker_qparams(node: fx.Node) -> tuple[torch.Tensor, torch.Tensor]:
+        marker = modules[cast(str, node.target)]
+        if not isinstance(marker, QuantizationMarker):
+            raise TypeError(f"Expected a quantization marker, got {type(marker)}")
+        return get_activation_quantization_params(marker)
+
+    def output_qparams(node: fx.Node) -> tuple[torch.Tensor, torch.Tensor]:
+        marker_users = [
+            user
+            for user in node.users
+            if user.op == "call_module"
+            and isinstance(modules[cast(str, user.target)], QuantizationMarker)
+        ]
+        if len(marker_users) != 1:
+            raise ValueError(
+                f"Expected exactly one output marker for {node.name}, "
+                f"got {len(marker_users)}"
+            )
+        return marker_qparams(marker_users[0])
+
     for node in list(gm.graph.nodes):
+        if node.op == "call_module":
+            module = modules[cast(str, node.target)]
+            input_node = cast(fx.Node, node.args[0])
+
+            if isinstance(module, QuantizationMarker):
+                scale, zero = marker_qparams(node)
+                qparams[node] = (scale, zero)
+                if input_node.op == "placeholder":
+                    # Quantize incoming activations so we can accept floats but run them
+                    # through the quantized model.
+                    root.set_submodule(
+                        cast(str, node.target), QuantizeActivation(scale, zero)
+                    )
+                    value_remap[node] = new_graph.node_copy(
+                        node, lambda argument: value_remap[argument]
+                    )
+                else:
+                    value_remap[node] = value_remap[input_node]
+                continue
+
+            if isinstance(module, ConvRelu2d):
+                x_scale, x_zero = qparams[input_node]
+                y_scale, y_zero = output_qparams(node)
+                int_weights, int_bias, w_scale = quantize_layer_parameters(
+                    module.conv.weight.detach(), module.conv.bias, x_scale
+                )
+                root.set_submodule(
+                    cast(str, node.target),
+                    QuantizedConvRelu2d(
+                        weights=int_weights,
+                        bias=int_bias,
+                        w_scale=w_scale,
+                        x_scale=x_scale,
+                        x_zero=x_zero,
+                        y_scale=y_scale,
+                        y_zero=y_zero,
+                    ),
+                )
+                qparams[node] = (y_scale, y_zero)
+            elif isinstance(module, nn.Linear):
+                x_scale, x_zero = qparams[input_node]
+                y_scale, y_zero = output_qparams(node)
+                int_weights, int_bias, w_scale = quantize_layer_parameters(
+                    module.weight.detach(), module.bias, x_scale
+                )
+                root.set_submodule(
+                    cast(str, node.target),
+                    QuantizedLinear(
+                        weights=int_weights,
+                        bias=int_bias,
+                        w_scale=w_scale,
+                        x_scale=x_scale,
+                        x_zero=x_zero,
+                        y_scale=y_scale,
+                        y_zero=y_zero,
+                    ),
+                )
+                qparams[node] = (y_scale, y_zero)
+            elif isinstance(module, nn.MaxPool2d):
+                qparams[node] = qparams[input_node]
+            else:
+                raise TypeError(
+                    f"Unsupported module in quantized graph: {type(module).__name__}"
+                )
+
+            value_remap[node] = new_graph.node_copy(
+                node, lambda argument: value_remap[argument]
+            )
+            continue
+
         value_remap[node] = new_graph.node_copy(
             node, lambda argument: value_remap[argument]
         )
+        if node.op == "call_function":
+            input_node = cast(fx.Node, node.args[0])
+            qparams[node] = qparams[input_node]
 
-    result = fx.GraphModule(deepcopy(gm), new_graph)
+    result = fx.GraphModule(root, new_graph)
     result.graph.lint()
     result.recompile()
 
@@ -366,7 +539,6 @@ def main() -> None:
 
     calibration_loader = make_loader(args.data_dir, args.batch_size, train=True)
     test_loader = make_loader(args.data_dir, args.batch_size, train=False)
-    example_images, _ = next(iter(calibration_loader))
 
     fp32_model = SimpleCNN().cpu().eval()
     fp32_model.load_state_dict(
@@ -381,11 +553,17 @@ def main() -> None:
 
     fp32_accuracy = accuracy(fp32_model, test_loader)
     fused_accuracy = accuracy(fused_model, test_loader)
-    print(fp32_accuracy, fused_accuracy)
     assert fp32_accuracy == fused_accuracy
 
     marked = insert_quantization_markers(fused_model)
     calibrate(marked, calibration_loader, batches=args.calibration_batches)
+    quantized_model = quantize_calibrated(marked)
+    int8_accuracy = accuracy(quantized_model, test_loader)
+
+    print("---------------------------------")
+    quantized_model.graph.print_tabular()
+    print(f"fp32_test_accuracy = {fp32_accuracy:.2%}")
+    print(f"int8_test_accuracy = {int8_accuracy:.2%}")
 
 
 if __name__ == "__main__":

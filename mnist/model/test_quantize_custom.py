@@ -4,15 +4,39 @@ from quantize_custom import (
     INT8_MIN,
     QuantizedConvRelu2d,
     QuantizedLinear,
+    QuantizationMarker,
+    QuantizeActivation,
     dequantize,
+    fuse_conv_relu,
+    insert_quantization_markers,
     quantize,
     quantize32,
+    quantize_calibrated,
+    quantize_weights,
 )
 import torch
+from model import SimpleCNN
 
 
 def random_uniform(low, high, size=(), *, generator, dtype=torch.float64):
     return torch.empty(size, dtype=dtype).uniform_(low, high, generator=generator)
+
+
+class QuantizeWeightsTestCase(unittest.TestCase):
+    def test_quantizes_each_output_channel_with_its_own_scale(self):
+        weights = torch.tensor(
+            [[1.0, -1.0], [10.0, -10.0], [0.0, 0.0]], dtype=torch.float32
+        )
+        output_channel_axis = 0
+
+        int_weights, scales = quantize_weights(weights, axis=output_channel_axis)
+
+        self.assertEqual(scales.shape, (3,))
+        self.assertTrue(torch.all(scales > 0).item())
+        torch.testing.assert_close(int_weights[0], int_weights[1], rtol=0, atol=0)
+        torch.testing.assert_close(
+            int_weights[2], torch.zeros(2, dtype=torch.int8), rtol=0, atol=0
+        )
 
 
 class QuantizedConvolutionTestCase(unittest.TestCase):
@@ -489,3 +513,24 @@ class QuantizedLinearTestCase(unittest.TestCase):
                 torch.testing.assert_close(
                     actual.to(torch.int32), expected.to(torch.int32), rtol=0, atol=1
                 )
+
+
+class QuantizeCalibratedTestCase(unittest.TestCase):
+    def test_converts_calibrated_graph_to_integer_modules(self):
+        generator = torch.Generator().manual_seed(490)
+        model = SimpleCNN().eval()
+        traced = torch.fx.symbolic_trace(model)
+        marked = insert_quantization_markers(fuse_conv_relu(traced))
+        calibration_images = torch.rand((2, 1, 28, 28), generator=generator)
+        marked(calibration_images)
+
+        quantized = quantize_calibrated(marked)
+        result = quantized(calibration_images)
+        module_types = {type(module) for module in quantized.modules()}
+
+        self.assertEqual(result.shape, (2, 10))
+        self.assertEqual(result.dtype, torch.int8)
+        self.assertIn(QuantizeActivation, module_types)
+        self.assertIn(QuantizedConvRelu2d, module_types)
+        self.assertIn(QuantizedLinear, module_types)
+        self.assertNotIn(QuantizationMarker, module_types)
