@@ -1,5 +1,6 @@
 import argparse
 from copy import deepcopy
+import time
 from pathlib import Path
 from typing import cast
 
@@ -255,19 +256,19 @@ class QuantizedLinear(nn.Module):
         y_zero: torch.Tensor,  # int8
     ) -> None:
         super().__init__()
-        self.weights = weights
+        self.register_buffer("weights", weights)
 
         correction = (
             torch.sum(weights.type(torch.int32), dim=1, dtype=torch.int32) * x_zero
         )
-        self.full_bias = bias - correction
+        self.register_buffer("full_bias", bias - correction)
 
         final_scale = (w_scale * x_scale) / y_scale
         approx_m = torch.round(final_scale * (2**QuantizedLinear.SCALE_APPROX_BITS))
         assert torch.all((0 <= approx_m) & (approx_m <= INT32_MAX))
-        self.approx_m = approx_m.type(torch.int32)
+        self.register_buffer("approx_m", approx_m.type(torch.int32))
 
-        self.y_zero = y_zero
+        self.register_buffer("y_zero", y_zero)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         int32_accum = (
@@ -301,7 +302,7 @@ class QuantizedConvRelu2d(nn.Module):
         y_zero: torch.Tensor,  # int8[0]
     ) -> None:
         super().__init__()
-        self.weights = weights
+        self.register_buffer("weights", weights)
 
         kernel_h = weights.size(2)
         kernel_w = weights.size(3)
@@ -313,15 +314,15 @@ class QuantizedConvRelu2d(nn.Module):
             torch.sum(weights.type(torch.int32), dim=(1, 2, 3), dtype=torch.int32)
             * x_zero
         )
-        self.full_bias = bias - correction
+        self.register_buffer("full_bias", bias - correction)
 
         final_scale = (w_scale * x_scale) / y_scale
         approx_m = torch.round(final_scale * (2**QuantizedConvRelu2d.SCALE_APPROX_BITS))
         assert torch.all((0 <= approx_m) & (approx_m <= INT32_MAX))
-        self.approx_m = approx_m.type(torch.int32)
+        self.register_buffer("approx_m", approx_m.type(torch.int32))
 
-        self.x_zero = x_zero
-        self.y_zero = y_zero
+        self.register_buffer("x_zero", x_zero)
+        self.register_buffer("y_zero", y_zero)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out_n = x.size(0)
@@ -380,8 +381,8 @@ class QuantizeActivation(nn.Module):
 
     def __init__(self, scale: torch.Tensor, zero: torch.Tensor) -> None:
         super().__init__()
-        self.scale = scale
-        self.zero = zero
+        self.register_buffer("scale", scale)
+        self.register_buffer("zero", zero)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return quantize(input, self.scale, self.zero)
@@ -525,10 +526,11 @@ def parse_args() -> argparse.Namespace:
     base_dir = Path(__file__).parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, default=base_dir / "mnist_cnn.pt")
-    parser.add_argument("--output", type=Path, default=base_dir / "mnist_cnn_int8.pt2")
+    parser.add_argument("--output", type=Path, default=base_dir / "mnist_cnn_int8.pt")
     parser.add_argument("--data-dir", type=Path, default=base_dir / "data")
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--calibration-batches", type=int, default=100)
+    parser.add_argument("--measure-accuracy", action="store_true")
     return parser.parse_args()
 
 
@@ -551,19 +553,24 @@ def main() -> None:
     fused_model = fuse_conv_relu(gm)
     fused_model.graph.print_tabular()
 
-    fp32_accuracy = accuracy(fp32_model, test_loader)
-    fused_accuracy = accuracy(fused_model, test_loader)
-    assert fp32_accuracy == fused_accuracy
-
     marked = insert_quantization_markers(fused_model)
     calibrate(marked, calibration_loader, batches=args.calibration_batches)
-    quantized_model = quantize_calibrated(marked)
-    int8_accuracy = accuracy(quantized_model, test_loader)
 
     print("---------------------------------")
+    quantized_model = quantize_calibrated(marked)
     quantized_model.graph.print_tabular()
-    print(f"fp32_test_accuracy = {fp32_accuracy:.2%}")
-    print(f"int8_test_accuracy = {int8_accuracy:.2%}")
+
+    if args.measure_accuracy:
+        fp32_accuracy = accuracy(fp32_model, test_loader)
+        fused_accuracy = accuracy(fused_model, test_loader)
+        assert fp32_accuracy == fused_accuracy
+
+        int8_accuracy = accuracy(quantized_model, test_loader)
+
+        print(f"fp32_test_accuracy = {fp32_accuracy:.2%}")
+        print(f"int8_test_accuracy = {int8_accuracy:.2%}")
+
+    torch.save(quantized_model.state_dict(), args.output)
 
 
 if __name__ == "__main__":
