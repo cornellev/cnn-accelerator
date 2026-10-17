@@ -10,9 +10,10 @@
 // ================================================================
 
 module convolve_3x3_fsm #(
-    parameter IMG_COLS = 320,
-    parameter IMG_ROWS = 320,
-    parameter PIXEL_WIDTH = 8
+    parameter IMG_COLS     = 320,
+    parameter IMG_ROWS     = 320,
+    parameter PIXEL_WIDTH  = 8,
+    parameter KERNEL_COUNT = 32
 
 )(
     input  logic               clk,
@@ -20,9 +21,10 @@ module convolve_3x3_fsm #(
     input  logic               start,
     input  logic               pixel_valid,
     input  logic         [7:0] input_pixel,
+    input  logic signed  [7:0] weights [0:KERNEL_COUNT-1] [0:8],
 
     output logic               output_valid,
-    output logic signed  [7:0] quantized_value
+    output logic signed  [7:0] quantized_value [0:KERNEL_COUNT-1]
 );
 
     typedef enum logic [2:0] {
@@ -139,7 +141,7 @@ module convolve_3x3_fsm #(
         end
 
     end
-    
+
     logic [7:0] pixel_row_read [0:1];
 
     row_buffers #(
@@ -157,21 +159,6 @@ module convolve_3x3_fsm #(
         .rd_addr (col_count),
         .rd_data (pixel_row_read)
     );
-
-    // Hardcoded weight for kernel 1 for now
-    logic signed  [7:0] weights_1 [0:8];
-
-    always_comb begin : harcode_kernel_1_weights
-        weights_1[0] = -8'd60;
-        weights_1[1] = -8'd45;
-        weights_1[2] = -8'd30;
-        weights_1[3] = -8'd15;
-        weights_1[4] = -8'd0;
-        weights_1[6] =  8'd15;
-        weights_1[5] =  8'd30;
-        weights_1[7] =  8'd45;
-        weights_1[8] =  8'd60;
-    end
 
     // Window valid check
     logic window_ready_delayed;
@@ -209,12 +196,13 @@ module convolve_3x3_fsm #(
         end
     end
 
-    quantized_convolution kernel_1
-    (
-        .pixels          (window_pixels),
-        .weights         (weights_1),
-        .quantized_value (quantized_value)
-    );
-    
-endmodule
+    for (genvar i = 0; i < KERNEL_COUNT; i++) begin : generate_kernel
+        quantized_convolution kernel
+        (
+            .pixels          (window_pixels),
+            .weights         (weights[i]),
+            .quantized_value (quantized_value[i])
+        );
+    end
 
+endmodule
