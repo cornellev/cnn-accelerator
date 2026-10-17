@@ -24,6 +24,7 @@ module convolve_3x3_fsm #(
     input  logic signed  [7:0] weights [0:KERNEL_COUNT-1] [0:8],
 
     output logic               output_valid,
+    output logic               done,
     output logic signed  [7:0] quantized_value [0:KERNEL_COUNT-1]
 );
 
@@ -44,7 +45,6 @@ module convolve_3x3_fsm #(
         end
     end
 
-    logic  done;
     assign done = accept_pixel && (row_count == IMG_ROWS - 1) && 
                                   (col_count == IMG_COLS - 1);
 
