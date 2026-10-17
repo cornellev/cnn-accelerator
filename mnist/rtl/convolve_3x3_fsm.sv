@@ -184,11 +184,11 @@ module convolve_3x3_fsm #(
         else if (accept_pixel_delayed) begin
             window_pixels[0] <= window_pixels[1];
             window_pixels[1] <= window_pixels[2];
-            window_pixels[2] <= pixel_row_read[0];
+            window_pixels[2] <= pixel_row_read[1];
 
             window_pixels[3] <= window_pixels[4];
             window_pixels[4] <= window_pixels[5];
-            window_pixels[5] <= pixel_row_read[1];
+            window_pixels[5] <= pixel_row_read[0];
             
             window_pixels[6] <= window_pixels[7];
             window_pixels[7] <= window_pixels[8];
