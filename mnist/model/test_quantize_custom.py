@@ -1,12 +1,17 @@
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from quantize_custom import (
     INT8_MAX,
     INT8_MIN,
+    SCALE_APPROX_BITS,
     QuantizedConvRelu2d,
     QuantizedLinear,
     QuantizationMarker,
     QuantizeActivation,
     dequantize,
+    export_mem,
     fuse_conv_relu,
     insert_quantization_markers,
     quantize,
@@ -50,9 +55,7 @@ class QuantizedConvolutionTestCase(unittest.TestCase):
 
         for kernel_h, kernel_w in ((2, 3), (3, 2)):
             with self.subTest(kernel_h=kernel_h, kernel_w=kernel_w):
-                weights = torch.ones(
-                    (1, 1, kernel_h, kernel_w), dtype=torch.int8
-                )
+                weights = torch.ones((1, 1, kernel_h, kernel_w), dtype=torch.int8)
                 with self.assertRaises(AssertionError):
                     QuantizedConvRelu2d(
                         weights=weights,
@@ -534,3 +537,92 @@ class QuantizeCalibratedTestCase(unittest.TestCase):
         self.assertIn(QuantizedConvRelu2d, module_types)
         self.assertIn(QuantizedLinear, module_types)
         self.assertNotIn(QuantizationMarker, module_types)
+
+
+class ExportMemTestCase(unittest.TestCase):
+    def test_exports_kernels_biases_and_qparams_in_graph_order(self):
+        root = torch.nn.Module()
+
+        # Register linear first to ensure export follows execution, not registration.
+        root.linear = QuantizedLinear(
+            weights=torch.tensor([[-128, 127], [1, -1]], dtype=torch.int8),
+            bias=torch.tensor([-(2**31), 2**31 - 1], dtype=torch.int32),
+            w_scale=torch.tensor([0.25, 0.125]),
+            x_scale=torch.tensor(1.0),
+            x_zero=torch.tensor(0, dtype=torch.int8),
+            y_scale=torch.tensor(1.0),
+            y_zero=torch.tensor(-128, dtype=torch.int8),
+        )
+        root.conv = QuantizedConvRelu2d(
+            weights=torch.tensor([[[[1]], [[-2]]], [[[3]], [[4]]]], dtype=torch.int8),
+            bias=torch.tensor([-300, 400], dtype=torch.int32),
+            w_scale=torch.tensor([0.5, 0.25]),
+            x_scale=torch.tensor(1.0),
+            x_zero=torch.tensor(-3, dtype=torch.int8),
+            y_scale=torch.tensor(1.0),
+            y_zero=torch.tensor(127, dtype=torch.int8),
+        )
+        root.input_quant = QuantizeActivation(
+            torch.tensor(0.5), torch.tensor(-3, dtype=torch.int8)
+        )
+
+        graph = torch.fx.Graph()
+        value = graph.placeholder("x")
+        for name in ("input_quant", "conv", "linear"):
+            value = graph.call_module(name, (value,))
+        graph.output(value)
+        model = torch.fx.GraphModule(root, graph)
+
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "weights.mem"
+            export_mem(model, output)
+            lines = output.read_text().splitlines()
+            metadata = json.loads(output.with_suffix(".json").read_text())
+
+        self.assertTrue(all(len(line) == 2 for line in lines))
+
+        data = bytes(int(line, 16) for line in lines)
+        self.assertEqual(metadata["scale_approx_bits"], SCALE_APPROX_BITS)
+        self.assertEqual(
+            metadata["input_quantization"],
+            [{"name": "input_quant", "scale": 0.5, "zero": -3}],
+        )
+
+        layer_names = [layer["name"] for layer in metadata["layers"]]
+        self.assertEqual(layer_names, ["conv", "linear"])
+
+        def check_tensor(descriptor, expected, offset):
+            self.assertEqual(descriptor["offset"], offset)
+            self.assertEqual(descriptor["shape"], list(expected.shape))
+
+            width = expected.element_size()
+            length = descriptor["length"]
+            actual = [
+                int.from_bytes(data[index : index + width], "little", signed=True)
+                for index in range(offset, offset + length, width)
+            ]
+            self.assertEqual(actual, expected.reshape(-1).tolist())
+
+            return offset + length
+
+        offset = 0
+
+        for layer in metadata["layers"]:
+            module = model.get_submodule(layer["name"])
+            self.assertEqual(layer["offset"], offset)
+            self.assertEqual(layer["weight_shape"], list(module.weights.shape))
+
+            for channel, kernel in enumerate(layer["kernels"]):
+                offset = check_tensor(
+                    kernel["weights"], module.weights[channel], offset
+                )
+                offset = check_tensor(
+                    kernel["full_bias"], module.full_bias[channel], offset
+                )
+
+            for name, descriptor in layer["quantization"].items():
+                offset = check_tensor(descriptor, getattr(module, name), offset)
+
+            self.assertEqual(layer["length"], offset - layer["offset"])
+
+        self.assertEqual(offset, len(data))

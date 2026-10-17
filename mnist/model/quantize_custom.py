@@ -1,5 +1,6 @@
 import argparse
 from copy import deepcopy
+import json
 import time
 from pathlib import Path
 from typing import cast
@@ -157,6 +158,7 @@ INT8_MIN = -128
 INT8_MAX = 127
 INT32_MIN = -(2**31)
 INT32_MAX = 2**31 - 1
+SCALE_APPROX_BITS = 31
 
 
 def quantize(values: torch.Tensor, scale: torch.Tensor, zero: torch.Tensor):
@@ -243,8 +245,6 @@ def get_activation_quantization_params(
 
 
 class QuantizedLinear(nn.Module):
-    SCALE_APPROX_BITS = 31
-
     def __init__(
         self,
         weights: torch.Tensor,  # int8
@@ -264,7 +264,7 @@ class QuantizedLinear(nn.Module):
         self.register_buffer("full_bias", bias - correction)
 
         final_scale = (w_scale * x_scale) / y_scale
-        approx_m = torch.round(final_scale * (2**QuantizedLinear.SCALE_APPROX_BITS))
+        approx_m = torch.round(final_scale * (2**SCALE_APPROX_BITS))
         assert torch.all((0 <= approx_m) & (approx_m <= INT32_MAX))
         self.register_buffer("approx_m", approx_m.type(torch.int32))
 
@@ -279,8 +279,8 @@ class QuantizedLinear(nn.Module):
         )
 
         m_accum = self.approx_m.type(torch.int64) * int32_accum.type(torch.int64)
-        rounding_bit = (m_accum >> (QuantizedLinear.SCALE_APPROX_BITS - 1)) & 1
-        scaled = (m_accum >> QuantizedLinear.SCALE_APPROX_BITS) + rounding_bit
+        rounding_bit = (m_accum >> (SCALE_APPROX_BITS - 1)) & 1
+        scaled = (m_accum >> SCALE_APPROX_BITS) + rounding_bit
         requantized = torch.clip(scaled + self.y_zero, INT8_MIN, INT8_MAX).type(
             torch.int8
         )
@@ -289,8 +289,6 @@ class QuantizedLinear(nn.Module):
 
 
 class QuantizedConvRelu2d(nn.Module):
-    SCALE_APPROX_BITS = 31
-
     def __init__(
         self,
         weights: torch.Tensor,  # int8[out, in, h, w]
@@ -317,7 +315,7 @@ class QuantizedConvRelu2d(nn.Module):
         self.register_buffer("full_bias", bias - correction)
 
         final_scale = (w_scale * x_scale) / y_scale
-        approx_m = torch.round(final_scale * (2**QuantizedConvRelu2d.SCALE_APPROX_BITS))
+        approx_m = torch.round(final_scale * (2**SCALE_APPROX_BITS))
         assert torch.all((0 <= approx_m) & (approx_m <= INT32_MAX))
         self.register_buffer("approx_m", approx_m.type(torch.int32))
 
@@ -364,8 +362,8 @@ class QuantizedConvRelu2d(nn.Module):
         expanded_approx_m = self.approx_m.reshape(-1, 1, 1)
 
         m_relu = expanded_approx_m.type(torch.int64) * relu.type(torch.int64)
-        rounding_bit = (m_relu >> (QuantizedConvRelu2d.SCALE_APPROX_BITS - 1)) & 1
-        scaled = (m_relu >> QuantizedConvRelu2d.SCALE_APPROX_BITS) + rounding_bit
+        rounding_bit = (m_relu >> (SCALE_APPROX_BITS - 1)) & 1
+        scaled = (m_relu >> SCALE_APPROX_BITS) + rounding_bit
         requantized = torch.clip(scaled + self.y_zero, INT8_MIN, INT8_MAX).type(
             torch.int8
         )
@@ -522,16 +520,106 @@ def quantize_calibrated(gm: fx.GraphModule) -> fx.GraphModule:
     return result
 
 
+def export_mem(model: fx.GraphModule, output: Path) -> None:
+    """Export a .mem file and JSON metadata for all layers in `model`.
+    The layout of the output is described by the JSON metadata and
+    textually in this directory's README.md.
+    """
+    data = bytearray()
+
+    def append_tensor(tensor: Tensor) -> dict:
+        widths = {torch.int8: 1, torch.int32: 4}
+        width = widths[tensor.dtype]
+        offset = len(data)
+
+        for value in tensor.detach().cpu().reshape(-1).tolist():
+            data.extend(int(value).to_bytes(width, byteorder="little", signed=True))
+
+        return {
+            "offset": offset,
+            "length": len(data) - offset,
+            "shape": list(tensor.shape),
+        }
+
+    layers = []
+    input_quantization = []
+    for node in model.graph.nodes:
+        # For now we are limiting this to modules but we might have to deal
+        # with other layers in the future (e.g. call_function)
+        if node.op != "call_module":
+            continue
+
+        module = model.get_submodule(str(node.target))
+        if isinstance(module, QuantizeActivation):
+            # We're not going to do input conversion in the accelerator
+            # because it requires floating point operations, so we'll put
+            # those parameters in the metadata.
+            input_quantization.append(
+                {
+                    "name": str(node.target),
+                    "scale": module.scale.item(),
+                    "zero": module.zero.item(),
+                }
+            )
+        elif isinstance(module, (QuantizedConvRelu2d, QuantizedLinear)):
+            offset = len(data)
+            kernels = []
+            for channel, weights in enumerate(module.weights):
+                kernels.append(
+                    {
+                        "output_channel": channel,
+                        "weights": append_tensor(weights),
+                        "full_bias": append_tensor(module.full_bias[channel]),
+                    }
+                )
+
+            qparams = {"approx_m": append_tensor(module.approx_m)}
+
+            # For most layers exporting the input activation zero point
+            # is not necessary. For convolutions, however, we need to use
+            # the zero point to determine what value padding pixels should
+            # be. So we need to export it.
+            if isinstance(module, QuantizedConvRelu2d):
+                qparams["x_zero"] = append_tensor(module.x_zero)
+
+            qparams["y_zero"] = append_tensor(module.y_zero)
+
+            layers.append(
+                {
+                    "name": str(node.target),
+                    "type": type(module).__name__,
+                    "offset": offset,
+                    "length": len(data) - offset,
+                    "weight_shape": list(module.weights.shape),
+                    "kernels": kernels,
+                    "quantization": qparams,
+                }
+            )
+
+    metadata = {
+        "scale_approx_bits": SCALE_APPROX_BITS,
+        "input_quantization": input_quantization,
+        "layers": layers,
+    }
+    output.write_text("".join(f"{byte:02x}\n" for byte in data))
+    output.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n")
+
+
 def parse_args() -> argparse.Namespace:
     base_dir = Path(__file__).parent
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, default=base_dir / "mnist_cnn.pt")
-    parser.add_argument("--output", type=Path, default=base_dir / "mnist_cnn_int8.pt")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--export-format", choices=("torch", "mem"), default="torch")
     parser.add_argument("--data-dir", type=Path, default=base_dir / "data")
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--calibration-batches", type=int, default=100)
     parser.add_argument("--measure-accuracy", action="store_true")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.output is None:
+        suffix = ".pt" if args.export_format == "torch" else ".mem"
+        args.output = base_dir / f"mnist_cnn_int8{suffix}"
+    return args
 
 
 def main() -> None:
@@ -570,7 +658,10 @@ def main() -> None:
         print(f"fp32_test_accuracy = {fp32_accuracy:.2%}")
         print(f"int8_test_accuracy = {int8_accuracy:.2%}")
 
-    torch.save(quantized_model.state_dict(), args.output)
+    if args.export_format == "mem":
+        export_mem(quantized_model, args.output)
+    else:
+        torch.save(quantized_model.state_dict(), args.output)
 
 
 if __name__ == "__main__":

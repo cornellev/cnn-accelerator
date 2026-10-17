@@ -3,3 +3,5 @@ __pycache__/
 data/
 *.pt
 *.pt2
+*.mem
+*.json
