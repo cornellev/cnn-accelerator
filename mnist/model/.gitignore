@@ -5,3 +5,4 @@ data/
 *.pt2
 *.mem
 *.json
+image_export/
