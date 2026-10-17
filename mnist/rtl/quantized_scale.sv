@@ -18,7 +18,7 @@
 `define _QUANTIZED_SCALE_SV_
 
 module quantized_scale #(
-    parameter int   M_BITS  = 20,
+    parameter int   M_BITS  = 18,
     parameter logic RELU_ON = 1,
     parameter logic        [5:0]        N     = 6'd10,
     parameter logic signed [7:0]        SHIFT = 8'sd1,
