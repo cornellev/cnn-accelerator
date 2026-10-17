@@ -154,24 +154,50 @@ def insert_quantization_markers(m: fx.GraphModule) -> fx.GraphModule:
     return gm
 
 
-INT8_MIN = -128
-INT8_MAX = 127
-INT32_MIN = -(2**31)
-INT32_MAX = 2**31 - 1
-SCALE_APPROX_BITS = 31
+# Logical signed widths; storage remains int8 for weights/activations and int32
+# for biases and scale multipliers.
+WEIGHT_BITS = 8
+ACTIVATION_BITS = 8
+
+# we have to add this before scaling, and we want scale lhs to be at
+# most 27 bits (signed) so we'll let bias be up to 26 bits (since we
+# add the computed 20 bit multiply-accumulate sum to it)
+BIAS_BITS = 26
+
+# we have 27x18 bit *signed* multipliers, but M is an unsigned scalar
+SCALE_M_BITS = 17
+
+# we pretty much always scale down. SCALE_M_BITS - 1 allows an effective
+# scale up to 1.
+SCALE_SHIFT = SCALE_M_BITS - 1
 
 
-def quantize(values: torch.Tensor, scale: torch.Tensor, zero: torch.Tensor):
-    return torch.round(values / scale + zero).clamp(INT8_MIN, INT8_MAX).to(torch.int8)
+def signed_quantization_range(bits: int) -> tuple[int, int]:
+    """Return the inclusive two's-complement range for a signed bit width."""
+    if bits < 1:
+        raise ValueError("bits must be at least 1")
+    return -(2 ** (bits - 1)), 2 ** (bits - 1) - 1
 
 
-def quantize32(values: torch.Tensor, scale: torch.Tensor, zero: torch.Tensor):
-    # Float64 represents the int32 clipping bounds exactly.
-    return (
-        torch.round(values.to(torch.float64) / scale + zero)
-        .clamp(INT32_MIN, INT32_MAX)
-        .to(torch.int32)
-    )
+def quantize(
+    values: torch.Tensor,
+    scale: torch.Tensor,
+    zero: torch.Tensor,
+    bits: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Quantize to a signed logical width stored in int8, int16, or int32."""
+    if dtype not in (torch.int8, torch.int16, torch.int32):
+        raise ValueError("dtype must be torch.int8, torch.int16, or torch.int32")
+    quant_min, quant_max = signed_quantization_range(bits)
+    if bits > torch.iinfo(dtype).bits:
+        raise ValueError(f"{bits} bits do not fit in {dtype}")
+
+    # Float32 cannot represent wider clipping bounds (including 26-bit biases)
+    # exactly. Preserve the input precision for narrower quantization.
+    if bits > 16:
+        values = values.to(torch.float64)
+    return torch.round(values / scale + zero).clamp(quant_min, quant_max).to(dtype)
 
 
 def dequantize(values: torch.Tensor, scale: torch.Tensor, zero: torch.Tensor):
@@ -206,15 +232,14 @@ def quantize_weights(
     min = torch.minimum(min, -max)
     max = torch.maximum(-min, max)
 
-    quant_min = INT8_MIN
-    quant_max = INT8_MAX
+    quant_min, quant_max = signed_quantization_range(WEIGHT_BITS)
 
     scale = (max - min) / (quant_max - quant_min)
     # Mostly defensive, shouldn't happen in practice
     scale = torch.where(scale == 0, torch.ones_like(scale), scale)
 
     weight_zero = torch.tensor(0, dtype=torch.int8, device=weights.device)
-    int_weights = quantize(weights, scale, weight_zero)
+    int_weights = quantize(weights, scale, weight_zero, WEIGHT_BITS, torch.int8)
 
     if axis is not None:
         scale = scale.reshape(weights.size(axis))
@@ -235,12 +260,13 @@ def get_activation_quantization_params(
     observed_min = torch.minimum(marker.min, zero_float)
     observed_max = torch.maximum(marker.max, zero_float)
 
-    scale = (observed_max - observed_min) / (INT8_MAX - INT8_MIN)
+    quant_min, quant_max = signed_quantization_range(ACTIVATION_BITS)
+    scale = (observed_max - observed_min) / (quant_max - quant_min)
     if scale.item() == 0:
         # I don't think this will happen at all in practice, just defensive (chat written)
         scale = torch.ones_like(scale)
 
-    zero = torch.round(INT8_MIN - observed_min / scale).clamp(INT8_MIN, INT8_MAX)
+    zero = torch.round(quant_min - observed_min / scale).clamp(quant_min, quant_max)
     return scale, zero.type(torch.int8)
 
 
@@ -264,24 +290,25 @@ class QuantizedLinear(nn.Module):
         self.register_buffer("full_bias", bias - correction)
 
         final_scale = (w_scale * x_scale) / y_scale
-        approx_m = torch.round(final_scale * (2**SCALE_APPROX_BITS))
-        assert torch.all((0 <= approx_m) & (approx_m <= INT32_MAX))
+        approx_m = torch.round(final_scale * (2**SCALE_SHIFT))
+        assert torch.all((0 <= approx_m) & (approx_m < 2**SCALE_M_BITS))
         self.register_buffer("approx_m", approx_m.type(torch.int32))
 
         self.register_buffer("y_zero", y_zero)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        int32_accum = (
+        accum = (
             torch.matmul(
                 x.type(torch.int32), self.weights.type(torch.int32).transpose(0, 1)
             )
             + self.full_bias
         )
 
-        m_accum = self.approx_m.type(torch.int64) * int32_accum.type(torch.int64)
-        rounding_bit = (m_accum >> (SCALE_APPROX_BITS - 1)) & 1
-        scaled = (m_accum >> SCALE_APPROX_BITS) + rounding_bit
-        requantized = torch.clip(scaled + self.y_zero, INT8_MIN, INT8_MAX).type(
+        m_accum = self.approx_m.type(torch.int64) * accum.type(torch.int64)
+        rounding_bit = (m_accum >> (SCALE_SHIFT - 1)) & 1
+        scaled = (m_accum >> SCALE_SHIFT) + rounding_bit
+        quant_min, quant_max = signed_quantization_range(ACTIVATION_BITS)
+        requantized = torch.clip(scaled + self.y_zero, quant_min, quant_max).type(
             torch.int8
         )
 
@@ -315,8 +342,8 @@ class QuantizedConvRelu2d(nn.Module):
         self.register_buffer("full_bias", bias - correction)
 
         final_scale = (w_scale * x_scale) / y_scale
-        approx_m = torch.round(final_scale * (2**SCALE_APPROX_BITS))
-        assert torch.all((0 <= approx_m) & (approx_m <= INT32_MAX))
+        approx_m = torch.round(final_scale * (2**SCALE_SHIFT))
+        assert torch.all((0 <= approx_m) & (approx_m < 2**SCALE_M_BITS))
         self.register_buffer("approx_m", approx_m.type(torch.int32))
 
         self.register_buffer("x_zero", x_zero)
@@ -331,7 +358,8 @@ class QuantizedConvRelu2d(nn.Module):
         kernel_h = self.weights.size(2)
         kernel_w = self.weights.size(3)
 
-        int32_accum = (
+        # Use bias dtype
+        accum = (
             self.full_bias.reshape(1, -1, 1, 1)
             .expand([out_n, out_c, out_h, out_w])
             .clone()
@@ -355,16 +383,17 @@ class QuantizedConvRelu2d(nn.Module):
                         window.type(torch.int32) * kernel.type(torch.int32),
                         dim=(1, 2, 3),
                     )
-                    int32_accum[:, c, h, w] += convolved
+                    accum[:, c, h, w] += convolved
 
-        relu = torch.maximum(int32_accum, torch.tensor(0, dtype=torch.int32))
+        relu = torch.maximum(accum, torch.tensor(0, dtype=torch.int32))
 
         expanded_approx_m = self.approx_m.reshape(-1, 1, 1)
 
         m_relu = expanded_approx_m.type(torch.int64) * relu.type(torch.int64)
-        rounding_bit = (m_relu >> (SCALE_APPROX_BITS - 1)) & 1
-        scaled = (m_relu >> SCALE_APPROX_BITS) + rounding_bit
-        requantized = torch.clip(scaled + self.y_zero, INT8_MIN, INT8_MAX).type(
+        rounding_bit = (m_relu >> (SCALE_SHIFT - 1)) & 1
+        scaled = (m_relu >> SCALE_SHIFT) + rounding_bit
+        quant_min, quant_max = signed_quantization_range(ACTIVATION_BITS)
+        requantized = torch.clip(scaled + self.y_zero, quant_min, quant_max).type(
             torch.int8
         )
 
@@ -383,7 +412,7 @@ class QuantizeActivation(nn.Module):
         self.register_buffer("zero", zero)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return quantize(input, self.scale, self.zero)
+        return quantize(input, self.scale, self.zero, ACTIVATION_BITS, torch.int8)
 
 
 def quantize_layer_parameters(
@@ -399,7 +428,7 @@ def quantize_layer_parameters(
         )
     else:
         bias_zero = torch.tensor(0, dtype=torch.int32, device=bias.device)
-        int_bias = quantize32(bias, x_scale * w_scale, bias_zero)
+        int_bias = quantize(bias, x_scale * w_scale, bias_zero, BIAS_BITS, torch.int32)
 
     return int_weights, int_bias, w_scale
 
@@ -597,7 +626,7 @@ def export_mem(model: fx.GraphModule, output: Path) -> None:
             )
 
     metadata = {
-        "scale_approx_bits": SCALE_APPROX_BITS,
+        "scale_approx_bits": SCALE_SHIFT,
         "input_quantization": input_quantization,
         "layers": layers,
     }
