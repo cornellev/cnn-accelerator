@@ -2,6 +2,10 @@ import math
 import random
 from pathlib import Path
 
+import numpy as np
+from PIL import Image
+from scipy.signal import correlate2d
+
 SEED = 1
 CONVOLUTION_NUM_ELEMENTS = 9
 
@@ -115,8 +119,34 @@ def write_quantized_convolve_vectors(path, rng, n):
             result_bits = result
             f.write(f"{pixel_bits} {weight_bits} {result_bits}\n")
 
+# Hardcoded weights
+PICTURE_WEIGHTS = [-60, -45, -30, -15, 0, 30, 15, 45, 60]
+
+# Converts a picture to test convolve_3x3_fsm with one kerne
+# txt file gets only the valid quantized results
+def write_quantized_convolution_picture_vectors(image_path, picture_path, result_path):
+    picture = np.array(Image.open(image_path).convert("L"), dtype=np.int64)
+    weights = np.array(PICTURE_WEIGHTS).reshape(3, 3)
+
+    # "valid" gets rid of the unusued border width
+    unquantized_sums = correlate2d(picture, weights, mode="valid")
+    quantized_sum_list = quantized_scale(10, 10, 1, unquantized_sums.flatten().tolist())
+
+    with open(picture_path, "w") as f:
+        for pixel in picture.flatten():
+            f.write(f"{pixel:08b}\n")
+
+    with open(result_path, "w") as f:
+        for result_bits in quantized_sum_list:
+            f.write(f"{result_bits}\n")
+
+
 if __name__ == "__main__":
     vectors_dir = Path(__file__).resolve().parent.parent / "tb" / "vectors"
     vectors_dir.mkdir(parents=True, exist_ok=True)
     write_convolve_vectors(vectors_dir / "convolve_vectors.txt", random.Random(SEED), 100000)
     write_quantized_convolve_vectors(vectors_dir / "quantized_convolve_vectors.txt", random.Random(SEED), 100000)
+    picture_dir = Path(__file__).resolve().parent.parent / "tb" / "picture"
+    write_quantized_convolution_picture_vectors(picture_dir / "calibration_board.png",
+                                                picture_dir / "calibration_board.txt",
+                                                vectors_dir / "quantized_convolution_calibration_board_vectors.txt")
