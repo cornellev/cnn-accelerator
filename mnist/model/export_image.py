@@ -47,7 +47,8 @@ def load_first_layer(checkpoint: Path) -> torch.nn.Sequential:
 def write_binary_images(
     inputs: torch.Tensor, outputs: torch.Tensor, directory: Path
 ) -> None:
-    """Write row-major pixels, with output channels 0 through 7 on each line."""
+    """Write row-major pixels. Each output line is one 64-bit word with
+    channel 0 in the top byte and channel 7 in the bottom byte."""
     if inputs.dtype != torch.int8 or outputs.dtype != torch.int8:
         raise ValueError("Input and output images must be int8 tensors")
     if inputs.ndim != 2 or outputs.shape != (8, *inputs.shape):
@@ -59,7 +60,7 @@ def write_binary_images(
     pixels = outputs.permute(1, 2, 0).reshape(-1, 8).tolist()
     (directory / "output.txt").write_text(
         "".join(
-            " ".join(f"{value & 0xFF:08b}" for value in pixel) + "\n"
+            "".join(f"{value & 0xFF:08b}" for value in pixel) + "\n"
             for pixel in pixels
         )
     )
