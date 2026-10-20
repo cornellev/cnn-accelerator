@@ -1,0 +1,3 @@
+Wait info from Utku to do C subtraction - make sure tb's still work and reference py script
+Parameter list for M and shift for convolve and N constant
+first_layer_convolve_3x3_fsm_tb to make sure first layer works
