@@ -1,152 +1,188 @@
-import math 
-import random
+import argparse
 from pathlib import Path
+import random
 
-import numpy as np
+import torch
 from PIL import Image
-from scipy.signal import correlate2d
 
-SEED = 1
-CONVOLUTION_NUM_ELEMENTS = 9
+from model.quantize_custom import (
+    ACTIVATION_BITS,
+    BIAS_BITS,
+    SCALE_M_BITS,
+    SCALE_SHIFT,
+    WEIGHT_BITS,
+    QuantizedConvRelu2d,
+    signed_quantization_range,
+)
 
-# Convert an int that was interpeted as unsigned
-# binary to an int as interpreted as two's complement
-def unsigned_to_twos_complement(value, bits):
-    # Check if number fits into specified bit width, 
-    # return if it doesn't fit
-    if ((value >> bits) != 0):
-        return
+ROOT = Path(__file__).resolve().parents[1]
+CONVOLUTION_BITS = ACTIVATION_BITS + WEIGHT_BITS + (9 - 1).bit_length()
 
-    # Means MSB isn't set, so two's magnitude value
-    # equals unsigned binary interpretation
-    if ((value >> (bits - 1)) == 0):
-        return value
-    # MSB is set, so subtract two times the MSB value
-    else:
-        return value - 2 * pow(2, bits - 1)
 
-# Convert int to two's complement bit sequence
-def int_to_twos_complement(value, bits):
-    # Check if number fits into specified bit width, 
-    # return if it doesn't fit
-    max_value =  pow(2, bits - 1) - 1
-    min_value = -pow(2, bits - 1)
+def bits(value: int, width: int, *, signed: bool = True) -> str:
+    minimum, maximum = (
+        signed_quantization_range(width) if signed else (0, (1 << width) - 1)
+    )
 
-    if ((value > max_value) or (value < min_value)):
-        return
+    if not minimum <= value <= maximum:
+        raise ValueError(
+            f"{value} does not fit in {'signed' if signed else 'unsigned'} {width} bits"
+        )
 
-    # Mask with bitwise AND (Python already uses two's magnitude for ints)
-    masked_value = value & ((1 << bits) - 1)
-    return f"{masked_value:0{bits}b}"
+    return f"{value & ((1 << width) - 1):0{width}b}"
 
-# Pixel values are unsigned binary, weight values are generated as bare ints
-# and are converted to the signed/two's complement number system interpretation
-def convolve(pixels_list, weights_list):
 
-    sum_list = []
-    for i in range(0, len(pixels_list)):
-        sum = 0
-        for j in range(0, CONVOLUTION_NUM_ELEMENTS):
-            # Weight input is 8-bit two's complement so has to be converted
-            sum = sum + pixels_list[i][j] * unsigned_to_twos_complement(weights_list[i][j], 8)
+def packed(values: list[int], width: int) -> str:
+    return "".join(bits(value, width) for value in values)
 
-        sum_list.append(sum)
-    return sum_list
 
-# Generate pixel and weight values
-def generate_vectors(rng, n):
-    pixels_list  = []
-    weights_list = []
+def reference(
+    weights: torch.Tensor,
+    bias: int,
+    multiplier: int,
+    offset: int,
+    input_zero: int = 0,
+) -> QuantizedConvRelu2d:
+    # A power-of-two scale makes the requested integer multiplier exact.
+    return QuantizedConvRelu2d(
+        weights=weights.reshape(1, 1, 3, 3).to(torch.int8),
+        bias=torch.tensor([bias], dtype=torch.int32),
+        w_scale=torch.tensor([multiplier / (1 << SCALE_SHIFT)], dtype=torch.float64),
+        x_scale=torch.tensor(1.0, dtype=torch.float64),
+        x_zero=torch.tensor(input_zero, dtype=torch.int32),
+        y_scale=torch.tensor(1.0, dtype=torch.float64),
+        y_zero=torch.tensor(offset, dtype=torch.int8),
+    )
 
-    for i in range(0, n):
-        pixels  = []
-        weights = []
 
-        for j in range(0, CONVOLUTION_NUM_ELEMENTS):
-            pixels.append(rng.randint(0,255))
-            weights.append(rng.randint(0,255))
+@torch.inference_mode()
+def write_raw_vectors(path: Path, count: int, seed: int) -> None:
+    generator = torch.Generator().manual_seed(seed)
+    activation_min, activation_max = signed_quantization_range(ACTIVATION_BITS)
+    weight_min, weight_max = signed_quantization_range(WEIGHT_BITS)
 
-        pixels_list.append(pixels)
-        weights_list.append(weights)
+    with path.open("w") as file:
+        for _ in range(count):
+            pixels = torch.randint(
+                activation_min, activation_max + 1, (9,), generator=generator
+            )
+            weights = torch.randint(
+                weight_min, weight_max + 1, (9,), generator=generator
+            )
 
-    return pixels_list, weights_list
+            expected = torch.sum(
+                pixels.to(torch.int32) * weights.to(torch.int32),
+                dtype=torch.int32,
+            )
 
-def quantized_scale(M, N, SHIFT, unquantized_sum_list):
+            pixel_bits = packed(pixels.tolist(), ACTIVATION_BITS)
+            weight_bits = packed(weights.tolist(), WEIGHT_BITS)
+            result_bits = bits(int(expected), CONVOLUTION_BITS)
 
-    quantized_sum_list = []
+            file.write(f"{pixel_bits} {weight_bits} {result_bits}\n")
 
-    for i in range(0, len(unquantized_sum_list)):
-        if (unquantized_sum_list[i] > 0):
-            relu_value = unquantized_sum_list[i]
-        else:
-            relu_value = 0
 
-        scaled_value = SHIFT + ((M * relu_value) >> N)
+@torch.inference_mode()
+def write_quantized_vectors(path: Path, count: int, seed: int) -> None:
+    rng = random.Random(seed)
+    generator = torch.Generator().manual_seed(seed)
+    activation_min, activation_max = signed_quantization_range(ACTIVATION_BITS)
+    weight_min, weight_max = signed_quantization_range(WEIGHT_BITS)
+    bias_min, bias_max = signed_quantization_range(BIAS_BITS)
 
-        if (scaled_value > 127):
-            quantized_result =  127
-        elif (scaled_value < -128):
-            quantized_result = -128
-        else: 
-            quantized_result = scaled_value
+    with path.open("w") as file:
+        for _ in range(count):
+            pixels = torch.randint(
+                activation_min, activation_max + 1, (9,), generator=generator
+            )
+            weights = torch.randint(
+                weight_min, weight_max + 1, (9,), generator=generator
+            )
 
-        quantized_sum_list.append(int_to_twos_complement(quantized_result, 8))
+            bias = rng.choice([bias_min, bias_max, 0, rng.randint(-1024, 1024)])
+            multiplier = rng.choice(
+                [
+                    0,
+                    1,
+                    1 << (SCALE_SHIFT - 1),
+                    1 << SCALE_SHIFT,
+                    (1 << SCALE_M_BITS) - 1,
+                    rng.randrange(1 << SCALE_M_BITS),
+                ]
+            )
+            offset = rng.randint(activation_min, activation_max)
 
-    return quantized_sum_list
+            module = reference(weights, bias, multiplier, offset)
 
-def write_convolve_vectors(path, rng, n):
-    pixels_list, weights_list = generate_vectors(rng, n)
-    sum_list = convolve(pixels_list, weights_list)
+            # The reference pads its input; the center is the unpadded 3x3 result.
+            inputs = pixels.to(torch.int8).reshape(1, 1, 3, 3)
+            outputs = module(inputs)
+            expected = int(outputs[0, 0, 1, 1])
 
-    with open(path, "w") as f:
-        for pixels, weights, result in zip(pixels_list, weights_list, sum_list):
-            # Joins together all pixel bits and then the weight bits so tb can read easily
-            pixel_bits = "".join(f"{pixel:08b}" for pixel in pixels)
-            weight_bits = "".join(f"{weight:08b}" for weight in weights)
-            result_bits = int_to_twos_complement(result, 20)
-            f.write(f"{pixel_bits} {weight_bits} {result_bits}\n")
+            pixel_bits = packed(pixels.tolist(), ACTIVATION_BITS)
+            weight_bits = packed(weights.tolist(), WEIGHT_BITS)
+            params = " ".join(
+                [
+                    bits(int(module.full_bias[0]), BIAS_BITS),
+                    bits(int(module.approx_m[0]), SCALE_M_BITS, signed=False),
+                    bits(int(module.y_zero), ACTIVATION_BITS),
+                ]
+            )
 
-def write_quantized_convolve_vectors(path, rng, n):
-    pixels_list, weights_list = generate_vectors(rng, n)
-    unquantized_sum_list = convolve(pixels_list, weights_list)
-    quantized_sum_list = quantized_scale(10, 10, 1, unquantized_sum_list)
+            result_bits = bits(expected, ACTIVATION_BITS)
 
-    with open(path, "w") as f:
-        for pixels, weights, result in zip(pixels_list, weights_list, quantized_sum_list):
-            # Joins together all pixel bits and then the weight bits so tb can read easily
-            pixel_bits = "".join(f"{pixel:08b}" for pixel in pixels)
-            weight_bits = "".join(f"{weight:08b}" for weight in weights)
-            result_bits = result
-            f.write(f"{pixel_bits} {weight_bits} {result_bits}\n")
+            file.write(f"{pixel_bits} {weight_bits} {params} {result_bits}\n")
 
-# Hardcoded weights
-PICTURE_WEIGHTS = [-60, -45, -30, -15, 0, 30, 15, 45, 60]
 
-# Converts a picture to test convolve_3x3_fsm with one kerne
-# txt file gets only the valid quantized results
-def write_quantized_convolution_picture_vectors(image_path, picture_path, result_path):
-    picture = np.array(Image.open(image_path).convert("L"), dtype=np.int64)
-    weights = np.array(PICTURE_WEIGHTS).reshape(3, 3)
+@torch.inference_mode()
+def write_picture_vectors(picture_directory: Path, vector_directory: Path) -> None:
+    with Image.open(picture_directory / "calibration_board.png") as image:
+        image = image.convert("L")
+        width, height = image.size
 
-    # "valid" gets rid of the unusued border width
-    unquantized_sums = correlate2d(picture, weights, mode="valid")
-    quantized_sum_list = quantized_scale(10, 10, 1, unquantized_sums.flatten().tolist())
+        # Center the unsigned image samples into signed activation storage.
+        pixels = torch.tensor(list(image.tobytes()), dtype=torch.int32)
+        pixels = pixels.reshape(height, width) - 128
 
-    with open(picture_path, "w") as f:
-        for pixel in picture.flatten():
-            f.write(f"{pixel:08b}\n")
+    weights = torch.tensor([-60, -45, -30, -15, 0, 30, 15, 45, 60], dtype=torch.int8)
+    # A nonzero bias exercises bias addition in the streaming convolution path.
+    module = reference(weights, bias=37, multiplier=640, offset=1, input_zero=-128)
 
-    with open(result_path, "w") as f:
-        for result_bits in quantized_sum_list:
-            f.write(f"{result_bits}\n")
+    inputs = pixels.to(torch.int8).reshape(1, 1, height, width)
+    outputs = module(inputs)
+    expected = outputs[0, 0, 1:-1, 1:-1]
+
+    picture_path = picture_directory / "calibration_board.txt"
+    with picture_path.open("w") as file:
+        for value in pixels.flatten().tolist():
+            file.write(bits(value, ACTIVATION_BITS) + "\n")
+
+    expected_path = vector_directory / "quantized_convolution_calibration_board_vectors.txt"
+    with expected_path.open("w") as file:
+        for value in expected.flatten().tolist():
+            file.write(bits(value, ACTIVATION_BITS) + "\n")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--num-vectors", type=int, default=100000)
+    parser.add_argument("--seed", type=int, default=1)
+    args = parser.parse_args()
+
+    if args.num_vectors <= 0:
+        parser.error("--num-vectors must be positive")
+
+    torch.set_num_threads(1)
+
+    directory = ROOT / "tb" / "vectors"
+    directory.mkdir(parents=True, exist_ok=True)
+
+    write_raw_vectors(directory / "convolve_vectors.txt", args.num_vectors, args.seed)
+    write_quantized_vectors(
+        directory / "quantized_convolve_vectors.txt", args.num_vectors, args.seed
+    )
+    write_picture_vectors(ROOT / "tb" / "picture", directory)
 
 
 if __name__ == "__main__":
-    vectors_dir = Path(__file__).resolve().parent.parent / "tb" / "vectors"
-    vectors_dir.mkdir(parents=True, exist_ok=True)
-    write_convolve_vectors(vectors_dir / "convolve_vectors.txt", random.Random(SEED), 100000)
-    write_quantized_convolve_vectors(vectors_dir / "quantized_convolve_vectors.txt", random.Random(SEED), 100000)
-    picture_dir = Path(__file__).resolve().parent.parent / "tb" / "picture"
-    write_quantized_convolution_picture_vectors(picture_dir / "calibration_board.png",
-                                                picture_dir / "calibration_board.txt",
-                                                vectors_dir / "quantized_convolution_calibration_board_vectors.txt")
+    main()

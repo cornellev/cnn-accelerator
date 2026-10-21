@@ -1,3 +1,2 @@
 parameter-name-style=localparam_style:ALL_CAPS
 line-length=130
--explicit-parameter-storage-type

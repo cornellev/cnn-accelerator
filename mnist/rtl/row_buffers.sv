@@ -13,8 +13,9 @@
 //
 // ================================================================
 
+`include "rtl/quant_params.sv"
+
 module row_buffers #(
-    parameter int unsigned PIXEL_WIDTH = 8,
     parameter int unsigned IMAGE_WIDTH = 320,
     parameter int unsigned ROWS = 2
 )(
@@ -22,16 +23,16 @@ module row_buffers #(
     input  logic rst_n,
 
     input  logic [COL_WIDTH-1:0]   wr_addr,
-    input  logic [PIXEL_WIDTH-1:0] wr_data,
+    input  logic signed [ACTIVATION_BITS-1:0] wr_data,
     input  logic                   wr_en,
 
     input  logic                   rd_en,
     input  logic [COL_WIDTH-1:0]   rd_addr,
-    output logic [PIXEL_WIDTH-1:0] rd_data [0:ROWS-1]
+    output logic signed [ACTIVATION_BITS-1:0] rd_data [0:ROWS-1]
 );
 
     localparam int unsigned COL_WIDTH = (IMAGE_WIDTH > 1)  ? $clog2(IMAGE_WIDTH) : 1;
-    logic [PIXEL_WIDTH-1:0] memory [0:ROWS-1] [0:IMAGE_WIDTH-1];
+    logic signed [ACTIVATION_BITS-1:0] memory [0:ROWS-1] [0:IMAGE_WIDTH-1];
 
     // Read current column
     always_ff @(posedge clk) begin
