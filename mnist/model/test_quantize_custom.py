@@ -3,9 +3,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from quantize_custom import (
-    INT8_MAX,
-    INT8_MIN,
-    SCALE_APPROX_BITS,
+    ACTIVATION_BITS,
+    BIAS_BITS,
+    WEIGHT_BITS,
+    SCALE_SHIFT,
     QuantizedConvRelu2d,
     QuantizedLinear,
     QuantizationMarker,
@@ -15,19 +16,99 @@ from quantize_custom import (
     fuse_conv_relu,
     insert_quantization_markers,
     quantize,
-    quantize32,
     quantize_calibrated,
+    quantize_layer_parameters,
     quantize_weights,
+    signed_quantization_range,
 )
 import torch
 from model import SimpleCNN
+
+
+ACTIVATION_MIN = -(2 ** (ACTIVATION_BITS - 1))
+ACTIVATION_MAX = 2 ** (ACTIVATION_BITS - 1) - 1
+WEIGHT_MIN = -(2 ** (WEIGHT_BITS - 1))
+WEIGHT_MAX = 2 ** (WEIGHT_BITS - 1) - 1
+BIAS_MIN = -(2 ** (BIAS_BITS - 1))
+BIAS_MAX = 2 ** (BIAS_BITS - 1) - 1
 
 
 def random_uniform(low, high, size=(), *, generator, dtype=torch.float64):
     return torch.empty(size, dtype=dtype).uniform_(low, high, generator=generator)
 
 
-class QuantizeWeightsTestCase(unittest.TestCase):
+class QuantizeTestCase(unittest.TestCase):
+    def test_signed_ranges(self):
+        for bits, expected in ((1, (-1, 0)), (4, (-8, 7)), (8, (-128, 127))):
+            with self.subTest(bits=bits):
+                self.assertEqual(signed_quantization_range(bits), expected)
+
+    def test_rounds_and_clips_to_logical_width_not_storage_width(self):
+        values = torch.tensor([-100.0, -4.25, -0.25, 0.25, 0.75, 100.0])
+        scale = torch.tensor(0.5)
+        zero = torch.tensor(1)
+        for dtype in (torch.int8, torch.int16, torch.int32):
+            with self.subTest(dtype=dtype):
+                actual = quantize(values, scale, zero, bits=4, dtype=dtype)
+                expected = torch.tensor([-8, -8, 0, 2, 2, 7], dtype=dtype)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_wide_clipping_bounds_are_exact_for_float32_inputs(self):
+        for bits in (BIAS_BITS, 32):
+            with self.subTest(bits=bits):
+                lower = -(2 ** (bits - 1))
+                upper = 2 ** (bits - 1) - 1
+                values = torch.tensor([lower * 2, upper * 2], dtype=torch.float32)
+                actual = quantize(
+                    values, torch.tensor(1.0), torch.tensor(0), bits, torch.int32
+                )
+                torch.testing.assert_close(
+                    actual,
+                    torch.tensor([lower, upper], dtype=torch.int32),
+                    rtol=0,
+                    atol=0,
+                )
+
+    def test_rejects_invalid_widths_and_storage_types(self):
+        for bits, dtype in (
+            (0, torch.int8),
+            (-1, torch.int8),
+            (9, torch.int8),
+            (33, torch.int32),
+            (8, torch.float32),
+            (8, torch.uint8),
+        ):
+            with self.subTest(bits=bits, dtype=dtype):
+                with self.assertRaises(ValueError):
+                    quantize(
+                        torch.tensor(1.0),
+                        torch.tensor(1.0),
+                        torch.tensor(0),
+                        bits,
+                        dtype,
+                    )
+
+
+class QuantizeLayerParametersTestCase(unittest.TestCase):
+    def test_bias_uses_configured_width_with_int32_storage(self):
+        weights = torch.zeros((3, 2))
+        bias = torch.tensor([-(2.0**BIAS_BITS), 0.0, 2.0**BIAS_BITS])
+        _, int_bias, _ = quantize_layer_parameters(weights, bias, torch.tensor(1.0))
+        torch.testing.assert_close(
+            int_bias,
+            torch.tensor([BIAS_MIN, 0, BIAS_MAX], dtype=torch.int32),
+            rtol=0,
+            atol=0,
+        )
+
+    def test_absent_bias_uses_int32_zeros(self):
+        _, int_bias, _ = quantize_layer_parameters(
+            torch.ones((3, 2)), None, torch.tensor(1.0)
+        )
+        torch.testing.assert_close(
+            int_bias, torch.zeros(3, dtype=torch.int32), rtol=0, atol=0
+        )
+
     def test_quantizes_each_output_channel_with_its_own_scale(self):
         weights = torch.tensor(
             [[1.0, -1.0], [10.0, -10.0], [0.0, 0.0]], dtype=torch.float32
@@ -170,8 +251,8 @@ class QuantizedConvolutionTestCase(unittest.TestCase):
         WIDTH = 50
 
         weights = torch.randint(
-            INT8_MIN,
-            INT8_MAX,
+            WEIGHT_MIN,
+            WEIGHT_MAX,
             (OUT_CHANNELS, IN_CHANNELS, KERNEL_HEIGHT, KERNEL_WIDTH),
             dtype=torch.int8,
             generator=generator,
@@ -180,10 +261,10 @@ class QuantizedConvolutionTestCase(unittest.TestCase):
         layer = QuantizedConvRelu2d(
             weights=weights,
             bias=torch.randint(
-                INT8_MIN,
-                INT8_MAX,
+                BIAS_MIN,
+                BIAS_MAX + 1,
                 (OUT_CHANNELS,),
-                dtype=torch.int8,
+                dtype=torch.int32,
                 generator=generator,
             ),
             w_scale=random_uniform(
@@ -191,16 +272,16 @@ class QuantizedConvolutionTestCase(unittest.TestCase):
             ),
             x_scale=random_uniform(0, 2, generator=generator, dtype=torch.float32),
             x_zero=torch.randint(
-                INT8_MIN,
-                INT8_MAX,
+                ACTIVATION_MIN,
+                ACTIVATION_MAX,
                 tuple(),
                 dtype=torch.int8,
                 generator=generator,
             ),
             y_scale=random_uniform(0, 2, generator=generator, dtype=torch.float32),
             y_zero=torch.randint(
-                INT8_MIN,
-                INT8_MAX,
+                ACTIVATION_MIN,
+                ACTIVATION_MAX,
                 tuple(),
                 dtype=torch.int8,
                 generator=generator,
@@ -208,8 +289,8 @@ class QuantizedConvolutionTestCase(unittest.TestCase):
         )
 
         images = torch.randint(
-            INT8_MIN,
-            INT8_MAX,
+            ACTIVATION_MIN,
+            ACTIVATION_MAX,
             (NUM_IMAGES, IN_CHANNELS, HEIGHT, WIDTH),
             dtype=torch.int8,
             generator=generator,
@@ -246,26 +327,34 @@ class QuantizedConvolutionTestCase(unittest.TestCase):
                 )
                 max_multiplier = 10 ** random_uniform(-5.05, -0.05, generator=generator)
 
-                # The signed Q31 multiplier requires x_scale * w_scale / y_scale < 1.
+                # Keep the effective scale below 1 for the fixed-point multiplier.
                 y_scale = x_scale * w_scale.max() / max_multiplier
                 x_zero = torch.randint(
-                    INT8_MIN, INT8_MAX + 1, (), generator=generator, dtype=torch.int8
+                    ACTIVATION_MIN,
+                    ACTIVATION_MAX + 1,
+                    (),
+                    generator=generator,
+                    dtype=torch.int8,
                 )
                 y_zero = torch.randint(
-                    INT8_MIN, INT8_MAX + 1, (), generator=generator, dtype=torch.int8
+                    ACTIVATION_MIN,
+                    ACTIVATION_MAX + 1,
+                    (),
+                    generator=generator,
+                    dtype=torch.int8,
                 )
 
                 images_q = torch.randint(
-                    INT8_MIN,
-                    INT8_MAX + 1,
+                    ACTIVATION_MIN,
+                    ACTIVATION_MAX + 1,
                     (NUM_IMAGES, IN_CHANNELS, HEIGHT, WIDTH),
                     generator=generator,
                     dtype=torch.int8,
                 )
                 images = dequantize(images_q, x_scale, x_zero)
                 weights_q = torch.randint(
-                    INT8_MIN,
-                    INT8_MAX + 1,
+                    WEIGHT_MIN,
+                    WEIGHT_MAX + 1,
                     (OUT_CHANNELS, IN_CHANNELS, KERNEL_HEIGHT, KERNEL_WIDTH),
                     generator=generator,
                     dtype=torch.int8,
@@ -299,8 +388,8 @@ class QuantizedConvolutionTestCase(unittest.TestCase):
         w_scale = torch.tensor([0.25, 0.25], dtype=torch.float64)
         y_scale = torch.tensor(1.0, dtype=torch.float64)
 
-        for input_zero in (INT8_MIN, INT8_MAX):
-            for output_zero in (INT8_MIN, INT8_MAX):
+        for input_zero in (ACTIVATION_MIN, ACTIVATION_MAX):
+            for output_zero in (ACTIVATION_MIN, ACTIVATION_MAX):
                 with self.subTest(input_zero=input_zero, output_zero=output_zero):
                     convolved, expected = self._check_float_reference(
                         images,
@@ -314,7 +403,7 @@ class QuantizedConvolutionTestCase(unittest.TestCase):
                     )
                     self.assertTrue(torch.any(convolved < 0).item())
                     self.assertTrue(torch.any(convolved > 0).item())
-                    self.assertTrue(torch.any(expected == INT8_MAX).item())
+                    self.assertTrue(torch.any(expected == ACTIVATION_MAX).item())
 
     def _check_float_reference(
         self, images, weights, bias, x_scale, x_zero, w_scale, y_scale, y_zero
@@ -326,9 +415,9 @@ class QuantizedConvolutionTestCase(unittest.TestCase):
         bias_scales = x_scale * w_scale
         w_zero = torch.tensor(0, dtype=torch.int8)
         bias_zero = torch.tensor(0, dtype=torch.int32)
-        images_q = quantize(images, x_scale, x_zero)
-        weights_q = quantize(weights, weight_scales, w_zero)
-        bias_q = quantize32(bias, bias_scales, bias_zero)
+        images_q = quantize(images, x_scale, x_zero, ACTIVATION_BITS, torch.int8)
+        weights_q = quantize(weights, weight_scales, w_zero, WEIGHT_BITS, torch.int8)
+        bias_q = quantize(bias, bias_scales, bias_zero, BIAS_BITS, torch.int32)
 
         images_dq = dequantize(images_q, x_scale, x_zero)
         weights_dq = dequantize(weights_q, weight_scales, w_zero)
@@ -341,7 +430,7 @@ class QuantizedConvolutionTestCase(unittest.TestCase):
             padding=(weights.size(2) // 2, weights.size(3) // 2),
         )
         float_result = torch.relu(convolved)
-        expected = quantize(float_result, y_scale, y_zero)
+        expected = quantize(float_result, y_scale, y_zero, ACTIVATION_BITS, torch.int8)
 
         layer = QuantizedConvRelu2d(
             weights=weights_q,
@@ -404,6 +493,8 @@ class QuantizedLinearTestCase(unittest.TestCase):
             dequantize(bias, bias_scale, bias_zero),
             y_scale,
             y_zero,
+            ACTIVATION_BITS,
+            torch.int8,
         ).expand(4, -1)
 
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
@@ -443,7 +534,7 @@ class QuantizedLinearTestCase(unittest.TestCase):
 
         inputs = torch.tensor([[127], [-128]], dtype=torch.int8)
         actual = layer(inputs)
-        expected = torch.tensor([[INT8_MAX], [INT8_MIN]], dtype=torch.int8)
+        expected = torch.tensor([[ACTIVATION_MAX], [ACTIVATION_MIN]], dtype=torch.int8)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_matches_requantized_float_linear(self):
@@ -461,21 +552,29 @@ class QuantizedLinearTestCase(unittest.TestCase):
                 max_multiplier = 10 ** random_uniform(-5.05, -0.05, generator=generator)
                 y_scale = x_scale * w_scale.max() / max_multiplier
                 x_zero = torch.randint(
-                    INT8_MIN, INT8_MAX + 1, (), generator=generator, dtype=torch.int8
+                    ACTIVATION_MIN,
+                    ACTIVATION_MAX + 1,
+                    (),
+                    generator=generator,
+                    dtype=torch.int8,
                 )
                 y_zero = torch.randint(
-                    INT8_MIN, INT8_MAX + 1, (), generator=generator, dtype=torch.int8
+                    ACTIVATION_MIN,
+                    ACTIVATION_MAX + 1,
+                    (),
+                    generator=generator,
+                    dtype=torch.int8,
                 )
                 inputs_q = torch.randint(
-                    INT8_MIN,
-                    INT8_MAX + 1,
+                    ACTIVATION_MIN,
+                    ACTIVATION_MAX + 1,
                     (*batch_shape, in_features),
                     generator=generator,
                     dtype=torch.int8,
                 )
                 weights_q = torch.randint(
-                    INT8_MIN,
-                    INT8_MAX + 1,
+                    WEIGHT_MIN,
+                    WEIGHT_MAX + 1,
                     (out_features, in_features),
                     generator=generator,
                     dtype=torch.int8,
@@ -498,6 +597,8 @@ class QuantizedLinearTestCase(unittest.TestCase):
                     torch.nn.functional.linear(inputs_dq, weights_dq, bias_dq),
                     y_scale,
                     y_zero,
+                    ACTIVATION_BITS,
+                    torch.int8,
                 )
 
                 layer = QuantizedLinear(
@@ -582,7 +683,7 @@ class ExportMemTestCase(unittest.TestCase):
         self.assertTrue(all(len(line) == 2 for line in lines))
 
         data = bytes(int(line, 16) for line in lines)
-        self.assertEqual(metadata["scale_approx_bits"], SCALE_APPROX_BITS)
+        self.assertEqual(metadata["scale_approx_bits"], SCALE_SHIFT)
         self.assertEqual(
             metadata["input_quantization"],
             [{"name": "input_quant", "scale": 0.5, "zero": -3}],

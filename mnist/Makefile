@@ -5,7 +5,8 @@
 #   make vectors            regenerate the test vectors in tb/vectors
 #   make clean              delete the build output in target/
 
-PYTHON ?= python3
+# Vector generation imports the quantization reference and its torch dependencies.
+PYTHON ?= uv run python
 BUILD  := target
 
 RTL := $(wildcard rtl/*.sv)
@@ -26,8 +27,12 @@ $(BUILD)/%/sim: tb/%_tb.sv $(RTL)
 	verilator $(VERILATOR_FLAGS) --top-module $*_tb -Mdir $(BUILD)/$* -o sim $< $(RTL)
 
 vectors:
-	$(PYTHON) scripts/convolve_3x3_vectors.py
-	$(PYTHON) scripts/winograd_3x3_vectors.py
+	$(PYTHON) -m scripts.convolve_3x3_vectors
+	$(PYTHON) -m scripts.winograd_3x3_vectors
 
 clean:
 	rm -rf $(BUILD)
+
+format:
+	find . -type f \( -name '*.v' -o -name '*.sv' -o -name '*.vh' -o -name '*.svh' \) \
+		-exec verible-verilog-format --inplace --flagfile=../.verilog_format {} +

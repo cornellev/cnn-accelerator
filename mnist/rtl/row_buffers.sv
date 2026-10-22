@@ -13,25 +13,26 @@
 //
 // ================================================================
 
+`include "rtl/quant_params.sv"
+
 module row_buffers #(
-    parameter int unsigned PIXEL_WIDTH = 8,
     parameter int unsigned IMAGE_WIDTH = 320,
     parameter int unsigned ROWS = 2
-)(
-    input  logic clk,
-    input  logic rst_n,
+) (
+    input logic clk,
+    input logic rst_n,
 
-    input  logic [COL_WIDTH-1:0]   wr_addr,
-    input  logic [PIXEL_WIDTH-1:0] wr_data,
-    input  logic                   wr_en,
+    input logic        [      COL_WIDTH-1:0] wr_addr,
+    input logic signed [ACTIVATION_BITS-1:0] wr_data,
+    input logic                              wr_en,
 
-    input  logic                   rd_en,
-    input  logic [COL_WIDTH-1:0]   rd_addr,
-    output logic [PIXEL_WIDTH-1:0] rd_data [0:ROWS-1]
+    input  logic                              rd_en,
+    input  logic        [      COL_WIDTH-1:0] rd_addr,
+    output logic signed [ACTIVATION_BITS-1:0] rd_data[0:ROWS-1]
 );
 
-    localparam int unsigned COL_WIDTH = (IMAGE_WIDTH > 1)  ? $clog2(IMAGE_WIDTH) : 1;
-    logic [PIXEL_WIDTH-1:0] memory [0:ROWS-1] [0:IMAGE_WIDTH-1];
+    localparam int unsigned COL_WIDTH = (IMAGE_WIDTH > 1) ? $clog2(IMAGE_WIDTH) : 1;
+    logic signed [ACTIVATION_BITS-1:0] memory[0:ROWS-1][0:IMAGE_WIDTH-1];
 
     // Read current column
     always_ff @(posedge clk) begin
@@ -39,8 +40,7 @@ module row_buffers #(
             for (int i = 0; i < ROWS; i++) begin
                 rd_data[i] <= '0;
             end
-        end
-        else if (rd_en) begin
+        end else if (rd_en) begin
             for (int i = 0; i < ROWS; i++) begin
                 rd_data[i] <= memory[i][rd_addr];
             end
@@ -52,7 +52,7 @@ module row_buffers #(
     always_ff @(posedge clk) begin
         if (wr_en && rst_n) begin
             memory[0][wr_addr] <= wr_data;
-            for (int i = 0; i < ROWS-1; i++) begin
+            for (int i = 0; i < ROWS - 1; i++) begin
                 memory[i+1][wr_addr] <= rd_data[i];
             end
         end
