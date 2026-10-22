@@ -32,3 +32,7 @@ vectors:
 
 clean:
 	rm -rf $(BUILD)
+
+format:
+	find . -type f \( -name '*.v' -o -name '*.sv' -o -name '*.vh' -o -name '*.svh' \) \
+		-exec verible-verilog-format --inplace --flagfile=../.verilog_format {} +

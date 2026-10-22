@@ -23,11 +23,11 @@ module convolve_3x3_fsm_tb;
     localparam int IMG_ROWS = 314;
     localparam int KERNEL_COUNT = 1;
 
-    localparam int NUM_PIXELS = IMG_ROWS * IMG_COLS;
+    localparam int NUM_PIXELS  = IMG_ROWS * IMG_COLS;
     localparam int NUM_OUTPUTS = (IMG_ROWS - 2) * (IMG_COLS - 2);
 
     localparam string PICTURE_PATH = "tb/picture/calibration_board.txt";
-    localparam string RESULT_PATH = "tb/vectors/quantized_convolution_calibration_board_vectors.txt";
+    localparam string RESULT_PATH  = "tb/vectors/quantized_convolution_calibration_board_vectors.txt";
 
     logic                              clk;
     logic                              rst_n;
@@ -41,7 +41,7 @@ module convolve_3x3_fsm_tb;
 
     logic                              done;
     logic                              output_valid;
-    logic signed [ACTIVATION_BITS-1:0] quantized_value [0:KERNEL_COUNT-1];
+    logic signed [ACTIVATION_BITS-1:0] quantized_value[0:KERNEL_COUNT-1];
 
     convolve_3x3_fsm #(
         .IMG_COLS    (IMG_COLS),
@@ -65,11 +65,11 @@ module convolve_3x3_fsm_tb;
     initial clk = 1'b0;
     always #5 clk = ~clk;
 
-    logic signed [ACTIVATION_BITS-1:0] picture   [ 0:NUM_PIXELS-1];
-    logic signed [ACTIVATION_BITS-1:0] expected  [0:NUM_OUTPUTS-1];
+    logic signed [ACTIVATION_BITS-1:0] picture [ 0:NUM_PIXELS-1];
+    logic signed [ACTIVATION_BITS-1:0] expected[0:NUM_OUTPUTS-1];
 
     // Every valid output gets pushed here, checked after the frame is done
-    logic signed [ACTIVATION_BITS-1:0] scoreboard[              $];
+    logic signed [ACTIVATION_BITS-1:0] scoreboard[$];
 
     always @(posedge clk) begin
         if (output_valid) begin
@@ -142,8 +142,7 @@ module convolve_3x3_fsm_tb;
             $display("CONVOLVE_3x3_FSM TB: PASS -- %0d outputs, 0 errors", NUM_OUTPUTS);
             $finish;
         end else begin
-            $fatal(1, "CONVOLVE_3x3_FSM TB: FAIL -- %0d outputs, %0d errors", NUM_OUTPUTS,
-                   num_errors);
+            $fatal(1, "CONVOLVE_3x3_FSM TB: FAIL -- %0d outputs, %0d errors", NUM_OUTPUTS, num_errors);
         end
     end
 

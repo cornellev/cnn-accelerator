@@ -45,8 +45,7 @@ module convolve_3x3_tb;
             while (!$feof(
                 file
             )) begin
-                fields_read =
-                    $fscanf(file, "%b %b %b", pixel_bits, weight_bits, expected_convolution);
+                fields_read = $fscanf(file, "%b %b %b", pixel_bits, weight_bits, expected_convolution);
 
                 for (int i = 0; i < 9; i++) begin
                     pixels[i]  = pixel_bits[(9-i)*ACTIVATION_BITS-1-:ACTIVATION_BITS];
@@ -84,8 +83,7 @@ module convolve_3x3_tb;
             $display("CONVOLVE_3x3 TB: PASS -- %0d vectors, 0 errors", num_vectors);
             $finish;
         end else begin
-            $fatal(1, "CONVOLVE_3x3 TB TB: FAIL -- %0d vectors, %0d errors", num_vectors,
-                   num_errors);
+            $fatal(1, "CONVOLVE_3x3 TB TB: FAIL -- %0d vectors, %0d errors", num_vectors, num_errors);
         end
     end
 

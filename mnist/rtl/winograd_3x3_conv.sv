@@ -9,19 +9,18 @@
 //
 // ================================================================
 
-module winograd_3x3_conv
-(
-    input  logic         [7:0] tile        [0:15],  // 4x4 pixels, row-major
-    input  logic signed [11:0] u_weights   [0:15],  // G' g G'^T, precomputed
-    output logic signed [19:0] convolution [0:3]    // 2x2 outputs, row-major
+module winograd_3x3_conv (
+    input  logic        [ 7:0] tile       [0:15],  // 4x4 pixels, row-major
+    input  logic signed [11:0] u_weights  [0:15],  // G' g G'^T, precomputed
+    output logic signed [19:0] convolution[ 0:3]   // 2x2 outputs, row-major
 );
 
-    logic signed [10:0] d  [0:15];  // zero-extended pixels
-    logic signed [10:0] bt [0:15];  // B^T d
-    logic signed [10:0] v  [0:15];  // B^T d B
-    logic signed [22:0] m  [0:15];  // U' (.) V
-    logic signed [24:0] at [0:7];   // A^T m      (2x4)
-    logic signed [24:0] y  [0:3];   // A^T m A    (2x2) = 4 x convolution
+    logic signed [10:0] d [0:15];  // zero-extended pixels
+    logic signed [10:0] bt[0:15];  // B^T d
+    logic signed [10:0] v [0:15];  // B^T d B
+    logic signed [22:0] m [0:15];  // U' (.) V
+    logic signed [24:0] at[ 0:7];  // A^T m      (2x4)
+    logic signed [24:0] y [ 0:3];  // A^T m A    (2x2) = 4 x convolution
 
     always_comb begin
         for (int i = 0; i < 16; i++) begin
