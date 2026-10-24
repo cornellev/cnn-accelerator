@@ -23,8 +23,7 @@ module convolve_3x3_fsm_tb;
     localparam int IMG_ROWS = 314;
     localparam int KERNEL_COUNT = 1;
 
-    localparam int NUM_PIXELS  = IMG_ROWS * IMG_COLS;
-    localparam int NUM_OUTPUTS = (IMG_ROWS - 2) * (IMG_COLS - 2);
+    localparam int NUM_PIXELS = IMG_ROWS * IMG_COLS;
 
     localparam string PICTURE_PATH = "tb/picture/calibration_board.txt";
     localparam string RESULT_PATH  = "tb/vectors/quantized_convolution_calibration_board_vectors.txt";
@@ -34,10 +33,11 @@ module convolve_3x3_fsm_tb;
     logic                              start;
     logic                              pixel_valid;
     logic signed [ACTIVATION_BITS-1:0] input_pixel;
-    logic signed [    WEIGHT_BITS-1:0] weights         [0:KERNEL_COUNT-1] [0:8];
-    logic signed [      BIAS_BITS-1:0] bias            [0:KERNEL_COUNT-1];
-    logic        [   SCALE_M_BITS-1:0] quant_scale_mult[0:KERNEL_COUNT-1];
+    logic signed [    WEIGHT_BITS-1:0] weights           [0:KERNEL_COUNT-1] [0:8];
+    logic signed [      BIAS_BITS-1:0] bias              [0:KERNEL_COUNT-1];
+    logic        [   SCALE_M_BITS-1:0] quant_scale_mult  [0:KERNEL_COUNT-1];
     logic signed [ACTIVATION_BITS-1:0] quant_offset;
+    logic signed [ACTIVATION_BITS-1:0] prev_quant_offset;
 
     logic                              done;
     logic                              output_valid;
@@ -48,25 +48,26 @@ module convolve_3x3_fsm_tb;
         .IMG_ROWS    (IMG_ROWS),
         .KERNEL_COUNT(KERNEL_COUNT)
     ) dut (
-        .clk             (clk),
-        .rst_n           (rst_n),
-        .start           (start),
-        .pixel_valid     (pixel_valid),
-        .input_pixel     (input_pixel),
-        .weights         (weights),
-        .bias            (bias),
-        .quant_scale_mult(quant_scale_mult),
-        .quant_offset    (quant_offset),
-        .done            (done),
-        .output_valid    (output_valid),
-        .quantized_value (quantized_value)
+        .clk              (clk),
+        .rst_n            (rst_n),
+        .start            (start),
+        .pixel_valid      (pixel_valid),
+        .input_pixel      (input_pixel),
+        .weights          (weights),
+        .bias             (bias),
+        .quant_scale_mult (quant_scale_mult),
+        .quant_offset     (quant_offset),
+        .prev_quant_offset(prev_quant_offset),
+        .done             (done),
+        .output_valid     (output_valid),
+        .quantized_value  (quantized_value)
     );
 
     initial clk = 1'b0;
     always #5 clk = ~clk;
 
-    logic signed [ACTIVATION_BITS-1:0] picture [ 0:NUM_PIXELS-1];
-    logic signed [ACTIVATION_BITS-1:0] expected[0:NUM_OUTPUTS-1];
+    logic signed [ACTIVATION_BITS-1:0] picture [0:NUM_PIXELS-1];
+    logic signed [ACTIVATION_BITS-1:0] expected[0:NUM_PIXELS-1];
 
     // Every valid output gets pushed here, checked after the frame is done
     logic signed [ACTIVATION_BITS-1:0] scoreboard[$];
@@ -99,6 +100,7 @@ module convolve_3x3_fsm_tb;
         // Preserve the original scale: 10 / 2^10 = 640 / 2^16.
         quant_scale_mult[0] = SCALE_M_BITS'(640);
         quant_offset = ACTIVATION_BITS'(1);
+        prev_quant_offset = ACTIVATION_BITS'(0);
 
         rst_n       = 1'b0;
         start       = 1'b0;
@@ -116,14 +118,15 @@ module convolve_3x3_fsm_tb;
         send_frame();
 
         // The last output comes out a couple of cycles after done
-        repeat (5) @(posedge clk);
+        @(posedge done);
+        @(posedge clk);
 
         num_errors = 0;
-        if (scoreboard.size() != NUM_OUTPUTS) begin
-            $display("MISS got %0d outputs, want %0d", scoreboard.size(), NUM_OUTPUTS);
+        if (scoreboard.size() != NUM_PIXELS) begin
+            $display("MISS got %0d outputs, want %0d", scoreboard.size(), NUM_PIXELS);
             num_errors = num_errors + 1;
         end
-        for (int i = 0; i < NUM_OUTPUTS && i < scoreboard.size(); i++) begin
+        for (int i = 0; i < NUM_PIXELS && i < scoreboard.size(); i++) begin
             if (scoreboard[i] !== expected[i]) begin
                 num_errors = num_errors + 1;
                 if (num_errors <= 20)
@@ -139,10 +142,10 @@ module convolve_3x3_fsm_tb;
         end
 
         if (num_errors == 0) begin
-            $display("CONVOLVE_3x3_FSM TB: PASS -- %0d outputs, 0 errors", NUM_OUTPUTS);
+            $display("CONVOLVE_3x3_FSM TB: PASS -- %0d outputs, 0 errors", NUM_PIXELS);
             $finish;
         end else begin
-            $fatal(1, "CONVOLVE_3x3_FSM TB: FAIL -- %0d outputs, %0d errors", NUM_OUTPUTS, num_errors);
+            $fatal(1, "CONVOLVE_3x3_FSM TB: FAIL -- %0d outputs, %0d errors", NUM_PIXELS, num_errors);
         end
     end
 

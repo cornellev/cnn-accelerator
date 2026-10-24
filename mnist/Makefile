@@ -24,7 +24,7 @@ $(TBS): %: $(BUILD)/%/sim
 	./$<
 
 $(BUILD)/%/sim: tb/%_tb.sv $(RTL)
-	verilator $(VERILATOR_FLAGS) --top-module $*_tb -Mdir $(BUILD)/$* -o sim $< $(RTL)
+	verilator $(VERILATOR_FLAGS) --binary --trace --top-module $*_tb -Mdir $(BUILD)/$* -o sim $< $(RTL)
 
 vectors:
 	$(PYTHON) -m scripts.convolve_3x3_vectors
