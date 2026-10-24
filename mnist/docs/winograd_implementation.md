@@ -191,7 +191,72 @@ For layer 2, Winograd adds up the products across the 8 input channels while sti
 
 ---
 
-## 7. References
+## 7. Next FSM work
+
+This section is based on `convolve_3x3_fsm.sv` as of `main` @ `085807e` (after PR #4). Items are in priority order. The first group is needed before the FSM can match the PyTorch model bit for bit.
+
+### P0: match the model
+
+**1. Fix `first_layer_convolve_3x3_fsm_tb.sv` for the PR #4 interface.** It won't compile against the current FSM:
+- It passes a `PIXEL_WIDTH` parameter, which no longer exists.
+- It doesn't connect `bias`, `quant_scale_mult` or `quant_offset`.
+- It uses unsigned `[7:0]` pixels.
+- Its frame size is 314×314, while its vectors are 28×28: `first_layer_input.txt` and `first_layer_output.txt` both have 784 lines.
+- It reuses the include guard `_CONVOLVE_3X3_FSM_TB_SV_` from `convolve_3x3_fsm_tb.sv`.
+
+Read the biases, `approx_m` and `y_zero` from `weights.mem` using the offsets in `weights.json`, the same way the weights are read now. Because a plain `make` builds every testbench, this one currently breaks the whole run.
+
+**2. Add `padding=1`, and pad with the input zero point instead of 0.** The model's convs use `padding=1`, so a 28×28 input gives a 28×28 output. The FSM only produces the valid (H−2)×(W−2) region today. In `QuantizedConvRelu2d.forward`, padding uses `value=self.x_zero`, and `full_bias` already subtracts `x_zero · Σw` assuming all 9 taps are present. Padding with 0 would therefore give wrong values on every border pixel. The change is:
+- Add an `x_zero` input.
+- Run the row/column counters over the padded (H+2)×(W+2) frame.
+- Insert `x_zero` at the border positions instead of consuming an input pixel.
+- Emit outputs for all H×W positions.
+
+**3. Make `done` mean "last output written".** `done` currently fires when the last *pixel* is accepted. The last *output* comes out 2 cycles later, and the testbench works around that with `repeat (5)`. Generate `done` from the same delayed-valid chain as `output_valid`, so downstream logic and DMA can rely on it.
+
+### P1: make it work on the KV260
+
+**4. Add ready/valid handshaking (AXI4-Stream).** Add `s_tready` on the input and `m_tready` backpressure on the output. Padding insertion (item 2) needs a way to pause the input stream, and the Zynq DMA path to PS memory expects AXI-Stream.
+
+**5. Read weights from on-chip memory instead of ports.** With the default `KERNEL_COUNT = 32`, the weight port alone is 32 × 9 × 8 = 2,304 bits, plus biases and scales. That works in simulation but can't be a top-level interface. Instead:
+- Store weights, biases and scales in BRAM, loaded with `$readmemh` from `weights.mem` for simulation and from the PS for hardware.
+- Add a small load phase (`ST_LOAD`) before `ST_BUSY`.
+
+**6. Pipeline the datapath.** One cycle currently has to fit the 9 multiplies, the adder tree, the bias add, the 27×18 scale multiply, rounding and clamping. That won't close timing at 200–300 MHz. Add registers after the products, after the adder tree and around the scale multiply, using the DSP48E2's internal M/P registers where possible. Then drive `output_valid` and `done` from a valid shift register whose length is a `LATENCY` parameter.
+
+**7. Add a 2×2 max-pool stage.** Every conv in the model is followed by `MaxPool2d(2)`.
+- Each kernel needs a half-width row buffer of conv outputs and a comparator.
+- The stage emits one output on every other row and column.
+- Pooling the int8 outputs *after* requantization is exact. Requantization is monotonic non-decreasing (`approx_m ≥ 0`, followed by a clamp), so max-then-requantize equals requantize-then-max.
+
+### P2: layer 2 and DSP efficiency
+
+**8. Support multiple input channels (layer 2: 8 → 16).** Layer 2 sums 8 input channels into each output before the bias, ReLU and scale. Options:
+- Make the pixel stream channel-interleaved, and widen the row buffers to `IMG_COLS × C_in` with 8 window registers feeding one adder tree per output channel.
+- Or time-multiplex the input channels and accumulate. This uses fewer DSPs but takes 8× the cycles.
+
+The buffers are small at 14 × 8 channels × 2 rows × 8 bits. The main decision is DSP budget: about 1,152 DSPs fully parallel unpacked, against 1,248 available.
+
+**9. INT8 packing (Section 6).** Pair kernels (2k, 2k+1) in one DSP48E2 using the pre-adder:
+- Write a `dsp_int8_pack` module with the sign-borrow correction.
+- Check it against the existing `convolve_3x3` vectors.
+- Confirm in the Vivado utilization report that it maps to one DSP per pair. Use the `use_dsp` attribute, and check that 8×8 multiplies aren't being placed in LUTs.
+
+This halves the DSP count for both layers without changing the dataflow.
+
+**10. Synthesize out-of-context for the XCK26.** Get real DSP/LUT/BRAM utilization and timing numbers for the current FSM. That gives a measured baseline before choosing between packed direct and Winograd (items 9 and 11).
+
+**11. Optional: a Winograd tile FSM.** Only worth doing if item 10 shows we're DSP-bound after packing. It needs 3 row buffers, a 4×4 window with stride 2, a signed version of `winograd_3x3_conv`, U' computed in the export script, and output that feeds straight into the max-pool in item 7.
+
+### Small cleanups
+
+- `state_t` is `logic [2:0]` for 2 states. `logic [1:0]` is enough, or keep it to leave room for `ST_LOAD`.
+- The window registers aren't cleared at the start of a row. This is safe today because outputs are gated on `col_count >= 2`. Once padding is added, re-check the left-edge behaviour.
+- `todo.txt` still lists "C subtraction". PR #4 already folds the input zero point into `full_bias`, so what remains is item 2 (padding with `x_zero`).
+
+---
+
+## 8. References
 
 - Lavin & Gray, "Fast Algorithms for Convolutional Neural Networks," CVPR 2016 (Winograd F(m×m, r×r) for CNNs).
 - AMD/Xilinx WP486, "Deep Learning with INT8 Optimization on Xilinx Devices" (INT8 packing on DSP48E2).
