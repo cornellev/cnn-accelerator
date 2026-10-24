@@ -32,3 +32,20 @@ The memory export produces `weights.mem` and `weights.json`:
   kernel, bias, and quantization tensor, plus layer names/types and the input
   quantizer's scale and zero point. Offsets are zero-based and equal `.mem`
   line numbers minus one.
+
+### Winograd export
+
+`export_winograd_mem(quantized_model, Path("weights.mem"))` writes the same
+layout as `export_mem`, except each 3x3 convolution kernel is replaced by its Winograd
+F(2x2, 3x3) tile `U' = G' g G'^T` with `G' = 2G`:
+
+- Each kernel is `[input_channel, 4, 4]` int16 values (two little-endian bytes,
+  row-major), in place of the `[input_channel, 3, 3]` int8 weights. Values fit
+  in 12 signed bits, matching the `u_weights` port of `winograd_3x3_conv.sv`.
+- Biases, `approx_m`, zero points and linear layers are unchanged.
+- The layer's JSON has `"weight_format": "winograd_f2x2_3x3"` and a `winograd`
+  entry with `u_shape`, `u_bits` and `output_shift`. Direct layers have
+  `"weight_format": "direct"`.
+- With `G' = 2G` the Winograd result is 4x the direct convolution. Shift it
+  right by `output_shift` (2) before adding `full_bias`. Sum `U' (.) V` over
+  input channels first, then apply the output transform once.

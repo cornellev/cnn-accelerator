@@ -247,6 +247,36 @@ def quantize_weights(
     return int_weights, scale
 
 
+# Winograd F(2x2, 3x3) kernel transform. Uses G' = 2G so U' = G' g G'^T stays
+# an integer; the accelerator's result is 4x the direct convolution and gets
+# shifted right by 2. Must match mnist/scripts/winograd_3x3_vectors.py.
+WINOGRAD_G2 = torch.tensor(
+    [[2, 0, 0], [1, 1, 1], [1, -1, 1], [0, 0, 2]],
+    dtype=torch.int32,
+)
+WINOGRAD_U_BITS = 12
+WINOGRAD_OUTPUT_SHIFT = 2
+
+
+def winograd_transform_weights(weights: torch.Tensor) -> torch.Tensor:
+    """Transform int8[out, in, 3, 3] kernels into int16[out, in, 4, 4] U' tiles.
+
+    Every value fits in WINOGRAD_U_BITS signed bits (the `u_weights` port of
+    winograd_3x3_conv.sv); int16 is just the export container.
+    """
+    if weights.dim() != 4 or tuple(weights.shape[2:]) != (3, 3):
+        raise ValueError(
+            f"expected [out, in, 3, 3] kernels, got {list(weights.shape)}"
+        )
+
+    g2 = WINOGRAD_G2.to(weights.device)
+    u = g2 @ weights.type(torch.int32) @ g2.T
+
+    limit = 2 ** (WINOGRAD_U_BITS - 1)
+    assert torch.all((-limit <= u) & (u < limit))
+    return u.type(torch.int16)
+
+
 def get_activation_quantization_params(
     marker: QuantizationMarker,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -624,6 +654,94 @@ def export_mem(model: fx.GraphModule, output: Path) -> None:
                     "quantization": qparams,
                 }
             )
+
+    metadata = {
+        "scale_approx_bits": SCALE_SHIFT,
+        "input_quantization": input_quantization,
+        "layers": layers,
+    }
+    output.write_text("".join(f"{byte:02x}\n" for byte in data))
+    output.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n")
+
+
+def export_winograd_mem(model: fx.GraphModule, output: Path) -> None:
+    """Like `export_mem`, but 3x3 convolution kernels are exported as Winograd
+    F(2x2, 3x3) U' tiles (int16[in, 4, 4] per output channel) instead of raw
+    int8 weights. Linear layers, biases and qparams are exported unchanged.
+    The layout is described in this directory's README.md.
+    """
+    data = bytearray()
+
+    def append_tensor(tensor: Tensor) -> dict:
+        widths = {torch.int8: 1, torch.int16: 2, torch.int32: 4}
+        width = widths[tensor.dtype]
+        offset = len(data)
+
+        for value in tensor.detach().cpu().reshape(-1).tolist():
+            data.extend(int(value).to_bytes(width, byteorder="little", signed=True))
+
+        return {
+            "offset": offset,
+            "length": len(data) - offset,
+            "shape": list(tensor.shape),
+        }
+
+    layers = []
+    input_quantization = []
+    for node in model.graph.nodes:
+        if node.op != "call_module":
+            continue
+
+        module = model.get_submodule(str(node.target))
+        if isinstance(module, QuantizeActivation):
+            input_quantization.append(
+                {
+                    "name": str(node.target),
+                    "scale": module.scale.item(),
+                    "zero": module.zero.item(),
+                }
+            )
+        elif isinstance(module, (QuantizedConvRelu2d, QuantizedLinear)):
+            offset = len(data)
+            is_winograd = isinstance(module, QuantizedConvRelu2d)
+            exported_weights = (
+                winograd_transform_weights(module.weights)
+                if is_winograd
+                else module.weights
+            )
+
+            kernels = []
+            for channel, weights in enumerate(exported_weights):
+                kernels.append(
+                    {
+                        "output_channel": channel,
+                        "weights": append_tensor(weights),
+                        "full_bias": append_tensor(module.full_bias[channel]),
+                    }
+                )
+
+            qparams = {"approx_m": append_tensor(module.approx_m)}
+            if isinstance(module, QuantizedConvRelu2d):
+                qparams["x_zero"] = append_tensor(module.x_zero)
+            qparams["y_zero"] = append_tensor(module.y_zero)
+
+            layer = {
+                "name": str(node.target),
+                "type": type(module).__name__,
+                "offset": offset,
+                "length": len(data) - offset,
+                "weight_shape": list(module.weights.shape),
+                "weight_format": "winograd_f2x2_3x3" if is_winograd else "direct",
+                "kernels": kernels,
+                "quantization": qparams,
+            }
+            if is_winograd:
+                layer["winograd"] = {
+                    "u_shape": list(exported_weights.shape),
+                    "u_bits": WINOGRAD_U_BITS,
+                    "output_shift": WINOGRAD_OUTPUT_SHIFT,
+                }
+            layers.append(layer)
 
     metadata = {
         "scale_approx_bits": SCALE_SHIFT,

@@ -13,6 +13,7 @@ from quantize_custom import (
     QuantizeActivation,
     dequantize,
     export_mem,
+    export_winograd_mem,
     fuse_conv_relu,
     insert_quantization_markers,
     quantize,
@@ -20,6 +21,9 @@ from quantize_custom import (
     quantize_layer_parameters,
     quantize_weights,
     signed_quantization_range,
+    WINOGRAD_OUTPUT_SHIFT,
+    WINOGRAD_U_BITS,
+    winograd_transform_weights,
 )
 import torch
 from model import SimpleCNN
@@ -727,3 +731,117 @@ class ExportMemTestCase(unittest.TestCase):
             self.assertEqual(layer["length"], offset - layer["offset"])
 
         self.assertEqual(offset, len(data))
+
+    def test_winograd_exports_conv_u_tiles_and_leaves_linear_direct(self):
+        root = torch.nn.Module()
+        root.conv = QuantizedConvRelu2d(
+            weights=torch.arange(-9, 9, dtype=torch.int8).reshape(2, 1, 3, 3),
+            bias=torch.tensor([-300, 400], dtype=torch.int32),
+            w_scale=torch.tensor([0.5, 0.25]),
+            x_scale=torch.tensor(1.0),
+            x_zero=torch.tensor(-3, dtype=torch.int8),
+            y_scale=torch.tensor(1.0),
+            y_zero=torch.tensor(127, dtype=torch.int8),
+        )
+        root.linear = QuantizedLinear(
+            weights=torch.tensor([[-128, 127], [1, -1]], dtype=torch.int8),
+            bias=torch.tensor([5, -5], dtype=torch.int32),
+            w_scale=torch.tensor([0.25, 0.125]),
+            x_scale=torch.tensor(1.0),
+            x_zero=torch.tensor(0, dtype=torch.int8),
+            y_scale=torch.tensor(1.0),
+            y_zero=torch.tensor(0, dtype=torch.int8),
+        )
+
+        graph = torch.fx.Graph()
+        value = graph.placeholder("x")
+        for name in ("conv", "linear"):
+            value = graph.call_module(name, (value,))
+        graph.output(value)
+        model = torch.fx.GraphModule(root, graph)
+
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "weights.mem"
+            export_winograd_mem(model, output)
+            lines = output.read_text().splitlines()
+            metadata = json.loads(output.with_suffix(".json").read_text())
+
+        data = bytes(int(line, 16) for line in lines)
+
+        def read_tensor(descriptor, width):
+            offset = descriptor["offset"]
+            return [
+                int.from_bytes(data[index : index + width], "little", signed=True)
+                for index in range(offset, offset + descriptor["length"], width)
+            ]
+
+        conv, linear = metadata["layers"]
+        self.assertEqual(conv["weight_format"], "winograd_f2x2_3x3")
+        self.assertEqual(
+            conv["winograd"],
+            {
+                "u_shape": [2, 1, 4, 4],
+                "u_bits": WINOGRAD_U_BITS,
+                "output_shift": WINOGRAD_OUTPUT_SHIFT,
+            },
+        )
+        u = winograd_transform_weights(root.conv.weights)
+        for channel, kernel in enumerate(conv["kernels"]):
+            self.assertEqual(kernel["weights"]["shape"], [1, 4, 4])
+            self.assertEqual(
+                read_tensor(kernel["weights"], 2), u[channel].reshape(-1).tolist()
+            )
+            self.assertEqual(
+                read_tensor(kernel["full_bias"], 4),
+                [root.conv.full_bias[channel].item()],
+            )
+
+        self.assertEqual(linear["weight_format"], "direct")
+        self.assertNotIn("winograd", linear)
+        self.assertEqual(read_tensor(linear["kernels"][0]["weights"], 1), [-128, 127])
+
+
+class WinogradTransformWeightsTestCase(unittest.TestCase):
+    def test_winograd_tile_matches_direct_convolution(self):
+        generator = torch.Generator().manual_seed(3)
+        weights = torch.randint(
+            WEIGHT_MIN, WEIGHT_MAX + 1, (4, 3, 3, 3), dtype=torch.int8, generator=generator
+        )
+        weights[0] = WEIGHT_MIN
+        weights[1] = WEIGHT_MAX
+        tile = torch.randint(
+            ACTIVATION_MIN,
+            ACTIVATION_MAX + 1,
+            (3, 4, 4),
+            dtype=torch.int32,
+            generator=generator,
+        )
+
+        u = winograd_transform_weights(weights)
+        self.assertEqual(u.dtype, torch.int16)
+        self.assertEqual(u.shape, (4, 3, 4, 4))
+
+        bt = torch.tensor(
+            [[1, 0, -1, 0], [0, 1, 1, 0], [0, -1, 1, 0], [0, 1, 0, -1]],
+            dtype=torch.int32,
+        )
+        at = torch.tensor([[1, 1, 1, 0], [0, 1, -1, -1]], dtype=torch.int32)
+
+        # Sum U' (.) V over input channels, then a single output transform.
+        v = bt @ tile @ bt.T
+        m = (u.type(torch.int32) * v).sum(dim=1)
+        winograd = (at @ m @ at.T) >> WINOGRAD_OUTPUT_SHIFT
+
+        direct = torch.zeros((4, 2, 2), dtype=torch.int32)
+        for r in range(2):
+            for c in range(2):
+                window = tile[:, r : r + 3, c : c + 3]
+                direct[:, r, c] = (weights.type(torch.int32) * window).sum(
+                    dim=(1, 2, 3)
+                )
+
+        torch.testing.assert_close(winograd, direct, rtol=0, atol=0)
+
+    def test_rejects_non_3x3_kernels(self):
+        with self.assertRaises(ValueError):
+            winograd_transform_weights(torch.ones((1, 1, 5, 5), dtype=torch.int8))
