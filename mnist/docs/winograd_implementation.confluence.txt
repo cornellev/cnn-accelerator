@@ -1,0 +1,281 @@
+{info}
+*Module:* {{mnist/rtl/winograd_3x3_conv.sv}}
+*Reference model / vectors:* {{mnist/scripts/winograd_3x3_vectors.py}}
+*Testbench:* {{mnist/tb/winograd_3x3_conv_tb.sv}} (100,000 random vectors plus corner cases, 0 errors)
+*Status:* Standalone and verified. I haven't integrated it into {{convolve_3x3_fsm}} yet.
+{info}
+
+{toc:maxLevel=2}
+
+h2. 1. Summary
+
+I built {{winograd_3x3_conv}} to compute a 2×2 block of 3×3 convolution outputs from a 4×4 pixel tile using *16 multiplies instead of 36*. That is 2.25× fewer multipliers per output. I designed it as a combinational drop-in for four {{convolve_3x3}} instances. The algorithm is Winograd F(2×2, 3×3).
+
+The catch is that my multiplies are wider: 12-bit × 11-bit instead of 8-bit × 8-bit. On our Kria KV260 that matters, because INT8 packing on the DSP48E2 already lets direct convolution do two 8-bit MACs per DSP. In Section 6 I compare the two approaches.
+
+----
+
+h2. 2. Why Winograd uses fewer multiplies
+
+Direct convolution of a 4×4 tile with a 3×3 kernel computes four overlapping 3×3 windows. That is 4 × 9 = 36 multiplies, even though there are only 16 distinct pixels. The centre four pixels are multiplied four times each.
+
+Winograd removes that redundancy. In one dimension, F(2,3) produces 2 outputs from 4 pixels (d0..d3) and 3 weights (g0..g2):
+
+{code}
+Direct (6 multiplies):
+  y0 = d0*g0 + d1*g1 + d2*g2
+  y1 = d1*g0 + d2*g1 + d3*g2
+
+Winograd (4 multiplies):
+  m1 = (d0 - d2) * g0
+  m2 = (d1 + d2) * (g0 + g1 + g2) / 2
+  m3 = (d2 - d1) * (g0 - g1 + g2) / 2
+  m4 = (d1 - d3) * g2
+
+  y0 = m1 + m2 + m3
+  y1 = m2 - m3 - m4
+{code}
+
+Each product multiplies a _sum of pixels_ by a _sum of weights_. Expanding them gives some unwanted cross terms, but those terms appear with opposite signs in different products, so they cancel when the products are added.
+
+Three things make this cheap:
+* *Weight sums are free at runtime.* Weights are fixed after training, so I compute the weight-side sums once offline and store them.
+* *Pixel sums are only adders.* All transform coefficients are 0, +1 or −1.
+* *Only the 4 products need multipliers.*
+
+*Where the formulas come from.* Convolution is polynomial multiplication. Treat the kernel as g(x) = g0 + g1·x + g2·x². The weight sums above are g evaluated at x = 0, 1, −1 and ∞ (g(∞) means the leading coefficient, g2). Evaluating at 4 points, multiplying pointwise and interpolating back gives the result with 4 multiplies. FFT convolution is the same recipe evaluated at the complex roots of unity (1, −i, −1, i). The complex points make each product a complex multiply (3–4 real multiplies), which is why FFT loses to Winograd for small kernels.
+
+----
+
+h2. 3. The 2D algorithm as I implemented it
+
+I apply the 1D transform to rows and then to columns, which gives F(2×2, 3×3):
+
+{code}
+Y = A^T [ (G' g G'^T) ⊙ (B^T d B) ] A      then   y = Y >>> 2
+{code}
+
+where {{d}} is the 4×4 tile, {{g}} is the 3×3 kernel and ⊙ is elementwise multiply.
+
+{code}
+B^T = [ 1  0 -1  0 ]     G' = 2G = [ 2  0  0 ]     A^T = [ 1  1  1  0 ]
+      [ 0  1  1  0 ]               [ 1  1  1 ]           [ 0  1 -1 -1 ]
+      [ 0 -1  1  0 ]               [ 1 -1  1 ]
+      [ 0  1  0 -1 ]               [ 0  0  2 ]
+{code}
+
+||Stage||RTL signals||Operation||Cost||
+|Input transform, rows|{{bt\[\]}}|Bᵀ · d|16 adds|
+|Input transform, columns|{{v\[\]}}|(Bᵀ d) · B|16 adds|
+|Kernel transform|{{u_weights\[\]}} input|U' = G' g G'ᵀ|Offline, once per kernel|
+|Elementwise multiply|{{m\[\]}}|M = U' ⊙ V|*16 multiplies*|
+|Output transform, rows|{{at\[\]}}|Aᵀ · M|16 adds|
+|Output transform, columns|{{y\[\]}}|(Aᵀ M) · A|8 adds|
+|Rescale|{{convolution\[\]}}|Y >>> 2|Wiring only|
+
+*Why I used G' = 2G and a final shift.* The textbook G matrix contains ½ entries. I scaled it by 2 so that U' = G' g G'ᵀ = 4·(G g Gᵀ) is always an integer. The output comes out exactly 4× too large, and {{>>> 2}} removes that with no rounding error. The result is *bit-exact* with direct convolution.
+
+h3. Port and internal widths (current RTL)
+
+||Signal||Width||Notes||
+|{{tile}}|16 × 8-bit *unsigned*|Zero-extended into {{d}} (11-bit signed)|
+|{{u_weights}}|16 × 12-bit signed|9 int8 weights × 4 needs up to ±1152|
+|{{v}}|11-bit signed|Sums of up to 4 pixels with ±1 coefficients|
+|{{m}}|23-bit signed|12 × 11 product|
+|{{y}}|25-bit signed|Sums of 9 products|
+|{{convolution}}|4 × 20-bit signed|Same width as {{convolve_3x3}}|
+
+h3. How I verified it
+
+I wrote {{winograd_3x3_vectors.py}} to compute the expected output with both a direct reference and a Python model of my Winograd datapath. The script checks that the two agree, then writes 100,000 random vectors plus corner cases into {{tb/vectors/winograd_vectors.txt}}. The corner cases are all-max pixels with max-positive, max-negative and alternating-sign kernels. My testbench, {{winograd_3x3_conv_tb.sv}}, runs all of them with 0 errors.
+
+----
+
+h2. 4. Limitations and open issues
+
+*My module is out of date with the PR #4 width changes.* Utku's PR #4 moved {{main}} to *signed int8 activations* ({{quant_params.sv}}). My {{winograd_3x3_conv}} still zero-extends unsigned pixels, and my vector script still generates unsigned tiles. Before my module can replace {{convolve_3x3}} in the quantized path, I need to make three changes:
+* Sign-extend {{tile}} instead of zero-extending it.
+* Shrink {{d}} / {{bt}} / {{v}}. With signed pixels, {{v}} fits in 10 bits.
+* Regenerate the vectors with signed pixels.
+
+*Wider multipliers.* My products are 12 × 11 bits (12 × 10 after the signed fix), compared with 8 × 8 for direct. Each one still fits in a single DSP48E2 (27 × 18), but they are too wide for INT8 packing (Section 6). I see this as the main limitation on the KV260.
+
+*More weight storage.* Each kernel is stored as 16 × 12-bit = 192 bits, compared with 9 × 8-bit = 72 bits for direct. That is 2.7× more weight memory (BRAM/URAM or registers). The {{.mem}} export from {{quantize_custom.py}} stores raw int8 weights, so I would have to compute U' either at export time or with a small kernel-transform unit on chip.
+
+*Only 3×3, stride 1.* The transform matrices are specific to a 3×3 kernel with stride 1. Our MNIST network only uses 3×3 stride-1 convolutions, so this is fine here, but it does not generalise.
+
+*Tiled input and output.* My module needs a 4×4 window and produces a 2×2 block, stepping by 2 pixels. To integrate it into the FSM I would need:
+* 3 row buffers instead of 2, and a 4×4 window register instead of 3×3.
+* Output blocks every other row and column, so the output stream is no longer one value per cycle.
+* Handling for odd output sizes, by padding or by a direct-convolution fallback on the edge.
+
+The good news is that every conv in our model is followed by {{MaxPool2d(2)}}. With {{padding=1}}, the 2×2 output blocks line up exactly with the pooling windows, so I can fuse the pooling directly after the output transform.
+
+*Critical path.* My module is fully combinational: 2 adder levels, then a multiply, then 2 more adder levels. At useful KV260 clock rates (200–300 MHz) it needs pipeline registers. I plan to cut after {{v}}, after {{m}} (inside the DSP's M register) and after {{y}}.
+
+*Bigger tiles don't scale cleanly.* F(4×4, 3×3) would need 36 multiplies for 16 outputs, which is 4× fewer than direct. But it evaluates at extra points such as ±2 and ±½. The transform constants grow, intermediate widths grow by several bits, and the transforms need real multiplies by constants. I chose F(2×2, 3×3) because it is the sweet spot for 8-bit integer hardware.
+
+*Zero points and bias.* Winograd is linear, so the existing {{full_bias}} approach still works: the input-zero-point correction is already folded into the bias. I add the bias after the output transform and then pass the result through the unchanged {{quantized_scale}}.
+
+----
+
+h2. 5. Kria KV260 resources
+
+Our KV260 uses the Zynq UltraScale+ *XCK26*:
+
+||Resource||XCK26||
+|DSP48E2 slices|1,248|
+|LUTs|~117k|
+|Block RAM / UltraRAM|144 BRAM (36 Kb) + 64 URAM (288 Kb), about 26.6 Mb total on-chip|
+
+Each DSP48E2 has a *27 × 18 signed multiplier*, a *27-bit pre-adder* in front of it and a 48-bit accumulator. Our {{quant_params.sv}} already targets this size: the scale multiply is 27 × 18.
+
+----
+
+h2. 6. Winograd vs. 8-bit-packed direct convolution on the KV260
+
+h3. How INT8 packing works
+
+AMD/Xilinx WP486 ("Deep Learning with INT8 Optimization on Xilinx Devices") describes how to get *two int8 × int8 MACs from one DSP48E2*, as long as the two multiplies share one operand:
+
+{code}
+(w1 << 18 + w2) * x  =  (w1*x) << 18  +  (w2*x)
+{code}
+
+The pre-adder builds w1·2¹⁸ + w2 on the 27-bit port, and x goes on the 18-bit port.
+* The low 18 bits hold w2·x and the upper bits hold w1·x.
+* A small correction is needed because a negative low product borrows 1 from the high field. Add the low field's sign bit back.
+* According to WP486, the 18-bit low field has room to accumulate about 7 products before it overflows into the high field (7 × 2¹⁴ < 2¹⁷).
+
+*This fits our design.* In {{convolve_3x3_fsm}}, all {{KERNEL_COUNT}} kernels see the same pixel window. So for each pixel I can pack *weights from two different kernels* and share the pixel as x. One DSP then serves two kernels. That doubles the throughput of direct convolution per DSP, with no change to the dataflow or the weight format.
+
+h3. Why my Winograd module can't also pack
+
+My Winograd products are 12 × 10–11 bits, about 22 bits wide. Two such products, plus guard bits, don't fit in a 27 × 18 multiplier, so Winograd gets *one multiply per DSP*. As a result, most of Winograd's advantage disappears against packed direct convolution.
+
+h3. DSP cost per output pixel
+
+These figures count multipliers only. The requantize multiply (1 DSP per output per kernel) is the same for every approach, so I left it out.
+
+|| ||Direct (1 MAC/DSP)||Direct + INT8 packing (2 MACs/DSP)||Winograd F(2×2,3×3)||
+|Per 2×2 block, one kernel|36|*18*|*16*|
+|Layer 1 (1 → 8 ch), per output pixel|72|36|32|
+|Layer 2 (8 → 16 ch), per output pixel|1,152|576|512|
+|Multiplier width|8 × 8|2 × (8 × 8) in 27 × 18|12 × 10/11|
+|Weight storage per 3×3 kernel|72 bits|72 bits|192 bits|
+|Extra adders|Accumulation only|Accumulation + sign correction|32 input-transform adds per tile per input channel, 24 output-transform adds per tile per output channel|
+|Window / buffers|3×3, 2 row buffers|3×3, 2 row buffers|4×4, 3 row buffers|
+|Output pattern|1 per cycle|1 per cycle|2×2 block every 2 columns|
+|Fits current FSM|Yes|Yes, small change|Needs FSM rework|
+|Bit-exact|Yes|Yes, with correction|Yes|
+
+For layer 2, Winograd adds up the products across the 8 input channels while still in the transform domain. That means the output transform runs once per output channel, not once per input-output pair, so its add cost stays small.
+
+h3. How I read the comparison
+
+* Against *unpacked direct*, my Winograd module saves 2.25× DSPs.
+* Against *packed direct*, it saves only about *11%* (16 vs 18 per block). In exchange it needs 2.7× the weight storage, a 4×4 window with an extra row buffer, a reworked FSM and output stream, and on-chip or export-time kernel transforms.
+* *We are not DSP-bound right now.* The FSM takes one pixel per clock. Layer 1 needs at most 72 DSPs unpacked, which is about 6% of the 1,248 available. Layer 2 fully parallel would need 1,152 unpacked (92%), 576 packed or 512 Winograd. Packing alone brings layer 2 comfortably within budget.
+* *Multiplies can also go in LUTs.* An 8 × 8 multiplier is roughly 60–70 LUTs, so with ~117k LUTs we can move some multiplies out of DSPs if needed. Wider Winograd products are much more expensive in LUTs.
+
+h3. My recommendation
+
+# *Make INT8-packed direct convolution our main datapath.* It reuses the existing FSM, row buffers, weight export and testbenches. It needs about the same DSPs as my Winograd module and has a much smaller integration risk.
+# *Keep my Winograd module as a verified alternative* for cases where DSPs become the bottleneck. Examples are a larger network or many layers instantiated in parallel, where its 11% saving starts to matter, or a design where fusing the 2×2 output block with MaxPool is attractive.
+# *If we pursue Winograd*, my next steps are to convert it to signed int8 pixels, pipeline it, compute U' in the export script and add a tiled FSM with fused max-pooling.
+
+----
+
+h2. 7. FSM work I plan to do next
+
+I based this list on {{convolve_3x3_fsm.sv}} as of {{main}} @ {{085807e}} (after PR #4). I've put the items in priority order. I need to finish the first group before the FSM can match the PyTorch model bit for bit.
+
+h3. P0: match the model
+
+h4. 1. Fix first_layer_convolve_3x3_fsm_tb.sv for the PR #4 interface
+
+It won't compile against the current FSM:
+* It passes a {{PIXEL_WIDTH}} parameter, which no longer exists.
+* It doesn't connect {{bias}}, {{quant_scale_mult}} or {{quant_offset}}.
+* It uses unsigned {{\[7:0\]}} pixels.
+* Its frame size is 314×314, while its vectors are 28×28: {{first_layer_input.txt}} and {{first_layer_output.txt}} both have 784 lines.
+* It reuses the include guard {{\_CONVOLVE_3X3_FSM_TB_SV\_}} from {{convolve_3x3_fsm_tb.sv}}.
+
+I'll read the biases, {{approx_m}} and {{y_zero}} from {{weights.mem}} using the offsets in {{weights.json}}, the same way the weights are read now. Because a plain {{make}} builds every testbench, this one currently breaks the whole run.
+
+h4. 2. Add padding=1, and pad with the input zero point instead of 0
+
+Our model's convs use {{padding=1}}, so a 28×28 input gives a 28×28 output. The FSM only produces the valid (H−2)×(W−2) region today. In {{QuantizedConvRelu2d.forward}}, padding uses {{value=self.x_zero}}, and {{full_bias}} already subtracts x_zero · Σw assuming all 9 taps are present. Padding with 0 would therefore give wrong values on every border pixel. My plan:
+* Add an {{x_zero}} input.
+* Run the row/column counters over the padded (H+2)×(W+2) frame.
+* Insert {{x_zero}} at the border positions instead of consuming an input pixel.
+* Emit outputs for all H×W positions.
+
+h4. 3. Make done mean "last output written"
+
+{{done}} currently fires when the last _pixel_ is accepted. The last _output_ comes out 2 cycles later, and the testbench works around that with {{repeat (5)}}. I'll generate {{done}} from the same delayed-valid chain as {{output_valid}}, so downstream logic and DMA can rely on it.
+
+h3. P1: make it work on the KV260
+
+h4. 4. Add ready/valid handshaking (AXI4-Stream)
+
+I'll add {{s_tready}} on the input and {{m_tready}} backpressure on the output. Padding insertion (item 2) needs a way to pause the input stream, and the Zynq DMA path to PS memory expects AXI-Stream.
+
+h4. 5. Read weights from on-chip memory instead of ports
+
+With the default {{KERNEL_COUNT = 32}}, the weight port alone is 32 × 9 × 8 = 2,304 bits, plus biases and scales. That works in simulation but can't be a top-level interface. Instead I'll:
+* Store weights, biases and scales in BRAM, loaded with {{$readmemh}} from {{weights.mem}} for simulation and from the PS for hardware.
+* Add a small load phase ({{ST_LOAD}}) before {{ST_BUSY}}.
+
+h4. 6. Pipeline the datapath
+
+One cycle currently has to fit the 9 multiplies, the adder tree, the bias add, the 27×18 scale multiply, rounding and clamping. That won't close timing at 200–300 MHz. I'll add registers after the products, after the adder tree and around the scale multiply, using the DSP48E2's internal M/P registers where possible. Then I'll drive {{output_valid}} and {{done}} from a valid shift register whose length is a {{LATENCY}} parameter.
+
+h4. 7. Add a 2×2 max-pool stage
+
+Every conv in our model is followed by {{MaxPool2d(2)}}.
+* Each kernel needs a half-width row buffer of conv outputs and a comparator.
+* The stage emits one output on every other row and column.
+* Pooling the int8 outputs _after_ requantization is exact. Requantization is monotonic non-decreasing (approx_m ≥ 0, followed by a clamp), so max-then-requantize equals requantize-then-max.
+
+h3. P2: layer 2 and DSP efficiency
+
+h4. 8. Support multiple input channels (layer 2: 8 → 16)
+
+Layer 2 sums 8 input channels into each output before the bias, ReLU and scale. The options I'm considering:
+* Make the pixel stream channel-interleaved, and widen the row buffers to IMG_COLS × C_in with 8 window registers feeding one adder tree per output channel.
+* Or time-multiplex the input channels and accumulate. This uses fewer DSPs but takes 8× the cycles.
+
+The buffers are small at 14 × 8 channels × 2 rows × 8 bits. The main decision is DSP budget: about 1,152 DSPs fully parallel unpacked, against 1,248 available.
+
+h4. 9. INT8 packing (Section 6)
+
+I'll pair kernels (2k, 2k+1) in one DSP48E2 using the pre-adder:
+* Write a {{dsp_int8_pack}} module with the sign-borrow correction.
+* Check it against the existing {{convolve_3x3}} vectors.
+* Confirm in the Vivado utilization report that it maps to one DSP per pair. I'll use the {{use_dsp}} attribute, and check that 8×8 multiplies aren't being placed in LUTs.
+
+This halves the DSP count for both layers without changing the dataflow.
+
+h4. 10. Synthesize out-of-context for the XCK26
+
+I want real DSP/LUT/BRAM utilization and timing numbers for the current FSM. That gives me a measured baseline before choosing between packed direct and Winograd (items 9 and 11).
+
+h4. 11. Optional: a Winograd tile FSM
+
+I'll only do this if item 10 shows we're DSP-bound after packing. It needs 3 row buffers, a 4×4 window with stride 2, a signed version of {{winograd_3x3_conv}}, U' computed in the export script, and output that feeds straight into the max-pool in item 7.
+
+h3. Small cleanups
+
+* {{state_t}} is {{logic \[2:0\]}} for 2 states. {{logic \[1:0\]}} is enough, or I can keep it to leave room for {{ST_LOAD}}.
+* The window registers aren't cleared at the start of a row. This is safe today because outputs are gated on {{col_count >= 2}}. Once I add padding, I need to re-check the left-edge behaviour.
+* {{todo.txt}} still lists "C subtraction". PR #4 already folds the input zero point into {{full_bias}}, so what remains is item 2 (padding with {{x_zero}}).
+
+----
+
+h2. 8. References
+
+* Lavin & Gray, "Fast Algorithms for Convolutional Neural Networks," CVPR 2016 (Winograd F(m×m, r×r) for CNNs).
+* AMD/Xilinx WP486, "Deep Learning with INT8 Optimization on Xilinx Devices" (INT8 packing on DSP48E2).
+* AMD UG579, "UltraScale Architecture DSP Slice User Guide" (DSP48E2 ports and pre-adder).
+* Interactive explainer: {{mnist/docs/winograd_explainer.html}}
