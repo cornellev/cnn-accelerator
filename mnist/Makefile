@@ -29,6 +29,7 @@ $(BUILD)/%/sim: tb/%_tb.sv $(RTL)
 vectors:
 	$(PYTHON) -m scripts.convolve_3x3_vectors
 	$(PYTHON) -m scripts.winograd_3x3_vectors
+	$(PYTHON) -m scripts.winograd_weight_transform_vectors
 
 clean:
 	rm -rf $(BUILD)
