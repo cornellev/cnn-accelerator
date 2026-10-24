@@ -1,3 +1,4 @@
+import os
 import random
 
 SEED = 1
@@ -33,7 +34,7 @@ def matmul(a, b):
 def transpose(a):
     return [list(row) for row in zip(*a)]
 
-# Convert int to two's complement bit sequence, erroring if it doesn't fit
+# Convert int to two's complement bit sequence
 def int_to_twos_complement(value, bits):
     max_value =  pow(2, bits - 1) - 1
     min_value = -pow(2, bits - 1)
@@ -48,7 +49,7 @@ def transform_kernel(weights):
     u = matmul(matmul(G2, g), transpose(G2))
     return [value for row in u for value in row]
 
-# Reference: direct 3x3 convolution (same pairing as convolve_3x3) over a 4x4 tile
+# Reference: direct 3x3 convolution over a 4x4 img("tile")
 def convolve_tile(tile, weights):
     outputs = []
     for r in range(OUTPUT_SIZE):
@@ -60,7 +61,6 @@ def convolve_tile(tile, weights):
             outputs.append(sum)
     return outputs
 
-# Winograd model of the RTL, used to check the math before simulating
 def winograd_tile(tile, u):
     d = [tile[r*TILE_SIZE:(r+1)*TILE_SIZE] for r in range(TILE_SIZE)]
     v = matmul(matmul(BT, d), transpose(BT))
@@ -68,28 +68,31 @@ def winograd_tile(tile, u):
     y = matmul(matmul(AT, m), transpose(AT))
     return [value >> 2 for row in y for value in row]
 
-# Extremes that stress the widest intermediate values
+# Extremes: largest products and every sign combination of signed pixels
 def corner_vectors():
-    checker = [255 if (r + c) % 2 == 0 else 0 for r in range(TILE_SIZE) for c in range(TILE_SIZE)]
+    checker = [127 if (r + c) % 2 == 0 else -128 for r in range(TILE_SIZE) for c in range(TILE_SIZE)]
     signed  = [127 if (r + c) % 2 == 0 else -128 for r in range(KERNEL_SIZE) for c in range(KERNEL_SIZE)]
     return [
-        ([0]   * 16, [0]    * 9),
-        ([255] * 16, [127]  * 9),
-        ([255] * 16, [-128] * 9),
-        ([255] * 16, signed),
-        (checker,    signed),
-        (checker,    [-128] * 9),
+        ([0]    * 16, [0]    * 9),
+        ([127]  * 16, [127]  * 9),
+        ([-128] * 16, [-128] * 9),
+        ([-128] * 16, [127]  * 9),
+        ([127]  * 16, signed),
+        (checker,     signed),
+        (checker,     [-128] * 9),
+        ([-value - 1 for value in checker], signed),
     ]
 
 def generate_vectors(rng, n):
     vectors = corner_vectors()
     for i in range(0, n):
-        tile    = [rng.randint(0, 255)    for j in range(TILE_SIZE * TILE_SIZE)]
+        tile    = [rng.randint(-128, 127) for j in range(TILE_SIZE * TILE_SIZE)]
         weights = [rng.randint(-128, 127) for j in range(KERNEL_SIZE * KERNEL_SIZE)]
         vectors.append((tile, weights))
     return vectors
 
 def write_winograd_vectors(path, rng, n):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         for tile, weights in generate_vectors(rng, n):
             u        = transform_kernel(weights)
@@ -97,9 +100,11 @@ def write_winograd_vectors(path, rng, n):
             assert winograd_tile(tile, u) == expected, f"Winograd mismatch: {tile} {weights}"
 
             # Fields: 16 pixels, 16 U' values, 4 expected outputs, each concatenated row-major
-            tile_bits   = "".join(f"{pixel:0{PIXEL_BITS}b}" for pixel in tile)
+            tile_bits   = "".join(int_to_twos_complement(pixel, PIXEL_BITS) for pixel in tile)
             u_bits      = "".join(int_to_twos_complement(value, U_BITS) for value in u)
             result_bits = "".join(int_to_twos_complement(value, RESULT_BITS) for value in expected)
             f.write(f"{tile_bits} {u_bits} {result_bits}\n")
 
-write_winograd_vectors("tb/vectors/winograd_vectors.txt", random.Random(SEED), NUM_RANDOM_VECTORS)
+MNIST_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+write_winograd_vectors(os.path.join(MNIST_DIR, "tb", "vectors", "winograd_vectors.txt"),
+                       random.Random(SEED), NUM_RANDOM_VECTORS)

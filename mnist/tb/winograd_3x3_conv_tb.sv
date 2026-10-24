@@ -15,7 +15,7 @@
 
 module winograd_3x3_conv_tb;
 
-    logic        [ 7:0] tile       [0:15];
+    logic signed [ 7:0] tile       [0:15];
     logic signed [11:0] u_weights  [0:15];
     // wire, not logic: Icarus 12 leaves an unpacked array output port
     // connected to a logic variable at X
@@ -93,6 +93,22 @@ module winograd_3x3_conv_tb;
             num_errors  = num_errors + file_errors;
         end
     endtask
+
+    // Waveforms: run vvp with +dump to write the first 50 vectors to
+    // winograd_3x3_conv_tb.vcd. Icarus skips unpacked arrays in a plain
+    // $dumpvars, so every word is listed.
+    initial begin
+        if ($test$plusargs("dump")) begin
+            $dumpfile("winograd_3x3_conv_tb.vcd");
+            for (int i = 0; i < 16; i++) begin
+                $dumpvars(0, tile[i], u_weights[i], dut.v[i], dut.m[i]);
+            end
+            for (int i = 0; i < 4; i++) begin
+                $dumpvars(0, convolution[i], expected_convolution[i], dut.y[i]);
+            end
+            #50 $dumpoff;
+        end
+    end
 
     initial begin
         num_vectors = 0;

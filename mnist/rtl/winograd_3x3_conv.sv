@@ -5,34 +5,43 @@
 //
 // Combinational block for winograd convolution
 //
-// Uses the winograd convolution unit to go through a 3x3 kernel of pixel values.
+// Computes the 2x2 block of 3x3 convolutions in a 4x4 tile of signed
+// pixels with 16 multiplies, using U' from winograd_weight_transform.
+// Output matches four convolve_3x3 calls exactly.
 //
 // ================================================================
 
+`ifndef _WINOGRAD_3X3_CONV_SV_
+`define _WINOGRAD_3X3_CONV_SV_
+
+`include "rtl/quant_params.sv"
+
 module winograd_3x3_conv (
-    input  logic        [ 7:0] tile       [0:15],  // 4x4 pixels, row-major
-    input  logic signed [11:0] u_weights  [0:15],  // G' g G'^T, precomputed
-    output logic signed [19:0] convolution[ 0:3]   // 2x2 outputs, row-major
+    input  logic signed [                      ACTIVATION_BITS-1:0] tile       [0:15],  // 4x4 pixels, row-major
+    input  logic signed [                        WEIGHT_BITS+4-1:0] u_weights  [0:15],  // G' g G'^T
+    output logic signed [ACTIVATION_BITS+WEIGHT_BITS+$clog2(9)-1:0] convolution[ 0:3]   // 2x2 outputs, row-major
 );
 
-    logic signed [10:0] d [0:15];  // zero-extended pixels
-    logic signed [10:0] bt[0:15];  // B^T d
-    logic signed [10:0] v [0:15];  // B^T d B
-    logic signed [22:0] m [0:15];  // U' (.) V
-    logic signed [24:0] at[ 0:7];  // A^T m      (2x4)
-    logic signed [24:0] y [ 0:3];  // A^T m A    (2x2) = 4 x convolution
+    localparam int BT_BITS = ACTIVATION_BITS + 1;  // |B^T d|   <= 2 * 128
+    localparam int V_BITS = ACTIVATION_BITS + 2;  // |V|       <= 4 * 128
+    localparam int M_BITS = WEIGHT_BITS + 4 + V_BITS;  // |U' V|  <= 1152 * 512
+    localparam int AT_BITS = M_BITS + 2;  // sum of 3 products
+    localparam int Y_BITS = AT_BITS + 2;  // sum of 3 partial sums
+    localparam int CONVOLUTION_BITS = ACTIVATION_BITS + WEIGHT_BITS + $clog2(9);
+
+    logic signed [BT_BITS-1:0] bt[0:15];  // B^T d
+    logic signed [ V_BITS-1:0] v [0:15];  // B^T d B
+    logic signed [ M_BITS-1:0] m [0:15];  // U' (.) V
+    logic signed [AT_BITS-1:0] at[ 0:7];  // A^T m      (2x4)
+    logic signed [ Y_BITS-1:0] y [ 0:3];  // A^T m A    (2x2) = 4 x convolution
 
     always_comb begin
-        for (int i = 0; i < 16; i++) begin
-            d[i] = $signed({3'b0, tile[i]});
-        end
-
         // Input transform, rows: B^T d
         for (int c = 0; c < 4; c++) begin
-            bt[0*4+c] = d[0*4+c] - d[2*4+c];
-            bt[1*4+c] = d[1*4+c] + d[2*4+c];
-            bt[2*4+c] = d[2*4+c] - d[1*4+c];
-            bt[3*4+c] = d[1*4+c] - d[3*4+c];
+            bt[0*4+c] = tile[0*4+c] - tile[2*4+c];
+            bt[1*4+c] = tile[1*4+c] + tile[2*4+c];
+            bt[2*4+c] = tile[2*4+c] - tile[1*4+c];
+            bt[3*4+c] = tile[1*4+c] - tile[3*4+c];
         end
 
         // Input transform, columns: (B^T d) B
@@ -62,8 +71,10 @@ module winograd_3x3_conv (
 
         // U' used 2G, so y is exactly 4x the direct result
         for (int i = 0; i < 4; i++) begin
-            convolution[i] = 20'(y[i] >>> 2);
+            convolution[i] = CONVOLUTION_BITS'(y[i] >>> 2);
         end
     end
 
 endmodule
+
+`endif  // _WINOGRAD_3X3_CONV_SV_
