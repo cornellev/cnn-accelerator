@@ -65,13 +65,13 @@ B^T = [ 1  0 -1  0 ]     G' = 2G = [ 2  0  0 ]     A^T = [ 1  1  1  0 ]
 {code}
 
 ||Stage||RTL signals||Operation||Cost||
-|Input transform, rows|{{bt\[\]}}|Bᵀ · d|16 adds|
-|Input transform, columns|{{v\[\]}}|(Bᵀ d) · B|16 adds|
-|Kernel transform|{{u_weights\[\]}} input|U' = G' g G'ᵀ|Offline, once per kernel|
-|Elementwise multiply|{{m\[\]}}|M = U' ⊙ V|*16 multiplies*|
-|Output transform, rows|{{at\[\]}}|Aᵀ · M|16 adds|
-|Output transform, columns|{{y\[\]}}|(Aᵀ M) · A|8 adds|
-|Rescale|{{convolution\[\]}}|Y >>> 2|Wiring only|
+|Input transform, rows|{{bt}}|Bᵀ · d|16 adds|
+|Input transform, columns|{{v}}|(Bᵀ d) · B|16 adds|
+|Kernel transform|{{u_weights}} input|U' = G' g G'ᵀ|Offline, once per kernel|
+|Elementwise multiply|{{m}}|M = U' ⊙ V|*16 multiplies*|
+|Output transform, rows|{{at}}|Aᵀ · M|16 adds|
+|Output transform, columns|{{y}}|(Aᵀ M) · A|8 adds|
+|Rescale|{{convolution}}|Y >>> 2|Wiring only|
 
 *Why I used G' = 2G and a final shift.* The textbook G matrix contains ½ entries. I scaled it by 2 so that U' = G' g G'ᵀ = 4·(G g Gᵀ) is always an integer. The output comes out exactly 4× too large, and {{>>> 2}} removes that with no rounding error. The result is *bit-exact* with direct convolution.
 
@@ -197,9 +197,9 @@ h4. 1. Fix first_layer_convolve_3x3_fsm_tb.sv for the PR #4 interface
 It won't compile against the current FSM:
 * It passes a {{PIXEL_WIDTH}} parameter, which no longer exists.
 * It doesn't connect {{bias}}, {{quant_scale_mult}} or {{quant_offset}}.
-* It uses unsigned {{\[7:0\]}} pixels.
+* It uses unsigned 8-bit pixels instead of signed int8.
 * Its frame size is 314×314, while its vectors are 28×28: {{first_layer_input.txt}} and {{first_layer_output.txt}} both have 784 lines.
-* It reuses the include guard {{\_CONVOLVE_3X3_FSM_TB_SV\_}} from {{convolve_3x3_fsm_tb.sv}}.
+* It reuses the same include guard as {{convolve_3x3_fsm_tb.sv}}.
 
 I'll read the biases, {{approx_m}} and {{y_zero}} from {{weights.mem}} using the offsets in {{weights.json}}, the same way the weights are read now. Because a plain {{make}} builds every testbench, this one currently breaks the whole run.
 
@@ -267,7 +267,7 @@ I'll only do this if item 10 shows we're DSP-bound after packing. It needs 3 row
 
 h3. Small cleanups
 
-* {{state_t}} is {{logic \[2:0\]}} for 2 states. {{logic \[1:0\]}} is enough, or I can keep it to leave room for {{ST_LOAD}}.
+* {{state_t}} is 3 bits wide for 2 states. 2 bits is enough, or I can keep it to leave room for {{ST_LOAD}}.
 * The window registers aren't cleared at the start of a row. This is safe today because outputs are gated on {{col_count >= 2}}. Once I add padding, I need to re-check the left-edge behaviour.
 * {{todo.txt}} still lists "C subtraction". PR #4 already folds the input zero point into {{full_bias}}, so what remains is item 2 (padding with {{x_zero}}).
 
