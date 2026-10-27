@@ -81,11 +81,12 @@ module convolve_3x3_fsm_tb;
     // Sends the picture one pixel per cycle with pixel_valid high
     task send_frame();
         for (int i = 0; i < NUM_PIXELS; i++) begin
-            pixel_valid <= 1'b1;
-            input_pixel <= picture[i];
-            @(posedge clk);
+            @(negedge clk);
+            pixel_valid = 1'b1;
+            input_pixel = picture[i];
         end
-        pixel_valid <= 1'b0;
+        @(negedge clk);
+        pixel_valid = 1'b0;
     endtask
 
     integer num_errors;
@@ -94,32 +95,33 @@ module convolve_3x3_fsm_tb;
         $readmemb(PICTURE_PATH, picture);
         $readmemb(RESULT_PATH, expected);
 
+        // These must match with convolve_3x3_vectors
         weights[0] = '{-60, -45, -30, -15, 0, 30, 15, 45, 60};
-        // Exercise bias addition rather than bypassing it with a zero bias.
         bias[0] = BIAS_BITS'(37);
-        // Preserve the original scale: 10 / 2^10 = 640 / 2^16.
         quant_scale_mult[0] = SCALE_M_BITS'(640);
         quant_offset = ACTIVATION_BITS'(1);
-        prev_quant_offset = ACTIVATION_BITS'(0);
+        prev_quant_offset = ACTIVATION_BITS'(-128);
 
         rst_n       = 1'b0;
         start       = 1'b0;
         pixel_valid = 1'b0;
         input_pixel = '0;
 
-        repeat (3) @(posedge clk);
-        rst_n <= 1'b1;
+        repeat (3) @(negedge clk);
+        rst_n = 1'b1;
 
-        @(posedge clk);
-        start <= 1'b1;
-        @(posedge clk);
-        start <= 1'b0;
+        @(negedge clk);
+        start = 1'b1;
+        @(negedge clk);
+        start = 1'b0;
 
         send_frame();
 
-        // The last output comes out a couple of cycles after done
+        // done accompanies the last valid output. Let the posedge monitor
+        // capture it, then inspect the queue away from that sampling edge.
         @(posedge done);
         @(posedge clk);
+        @(negedge clk);
 
         num_errors = 0;
         if (scoreboard.size() != NUM_PIXELS) begin
@@ -133,8 +135,8 @@ module convolve_3x3_fsm_tb;
                     $display(
                         "MISS output %0d (row %0d, col %0d) | got %0d | want %0d",
                         i,
-                        i / (IMG_COLS - 2),
-                        i % (IMG_COLS - 2),
+                        i / IMG_COLS,
+                        i % IMG_COLS,
                         scoreboard[i],
                         expected[i]
                     );
@@ -147,6 +149,11 @@ module convolve_3x3_fsm_tb;
         end else begin
             $fatal(1, "CONVOLVE_3x3_FSM TB: FAIL -- %0d outputs, %0d errors", NUM_PIXELS, num_errors);
         end
+    end
+
+    initial begin
+        repeat (2 * NUM_PIXELS + 4 * IMG_COLS + 100) @(posedge clk);
+        $fatal(1, "CONVOLVE_3x3_FSM TB: timed out waiting for frame completion");
     end
 
 endmodule

@@ -97,13 +97,26 @@ def fuse_conv_relu(m: fx.GraphModule) -> fx.GraphModule:
 
 
 class QuantizationMarker(nn.Module):
-    def __init__(self, dim: tuple[int, ...] | None = None) -> None:
+    def __init__(
+        self,
+        dim: tuple[int, ...] | None = None,
+        *,
+        fixed_range: tuple[float, float] | None = None,
+    ) -> None:
         super().__init__()
         self.dim = dim
-        self.register_buffer("min", None)
-        self.register_buffer("max", None)
+        self.fixed_range = fixed_range
+        self.register_buffer(
+            "min", torch.tensor(fixed_range[0]) if fixed_range is not None else None
+        )
+        self.register_buffer(
+            "max", torch.tensor(fixed_range[1]) if fixed_range is not None else None
+        )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if self.fixed_range is not None:
+            return input
+
         # TODO: quantiles
         current_min = torch.amin(input, dim=self.dim).detach()
         current_max = torch.amax(input, dim=self.dim).detach()
@@ -138,7 +151,12 @@ def insert_quantization_markers(m: fx.GraphModule) -> fx.GraphModule:
             continue
 
         marker_name = f"quantization_marker_{node.name}"
-        gm.add_module(marker_name, QuantizationMarker())
+        # Normalized camera bytes have a known range, independent of calibration.
+        if node.op == "placeholder":
+            marker = QuantizationMarker(fixed_range=(0.0, 1.0))
+        else:
+            marker = QuantizationMarker()
+        gm.add_module(marker_name, marker)
 
         # Capture the existing users first so the marker does not get rewritten
         # to consume its own output.
