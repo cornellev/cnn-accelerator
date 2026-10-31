@@ -12,12 +12,12 @@
 
 module max_pooling
 (
-    input  logic [ACTIVATION_BITS-1:0] input_pixel_1,
-    input  logic [ACTIVATION_BITS-1:0] input_pixel_2,
-    input  logic [ACTIVATION_BITS-1:0] input_pixel_3,
-    input  logic [ACTIVATION_BITS-1:0] input_pixel_4,
+    input  logic signed [ACTIVATION_BITS-1:0] input_pixel_1,
+    input  logic signed [ACTIVATION_BITS-1:0] input_pixel_2,
+    input  logic signed [ACTIVATION_BITS-1:0] input_pixel_3,
+    input  logic signed [ACTIVATION_BITS-1:0] input_pixel_4,
 
-    output logic [ACTIVATION_BITS-1:0] max_pixel
+    output logic signed [ACTIVATION_BITS-1:0] max_pixel
 );
 
     logic [ACTIVATION_BIT-1:0] inter_1, inter_2;
