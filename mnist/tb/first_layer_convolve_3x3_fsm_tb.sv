@@ -19,8 +19,8 @@
 
 module first_layer_convolve_3x3_fsm_tb;
 
-    localparam int IMG_COLS     = 314;
-    localparam int IMG_ROWS     = 314;
+    localparam int IMG_COLS     = 28;
+    localparam int IMG_ROWS     = 28;
     localparam int KERNEL_COUNT = 8;
 
     localparam int NUM_PIXELS = IMG_ROWS * IMG_COLS;
@@ -36,6 +36,10 @@ module first_layer_convolve_3x3_fsm_tb;
     logic signed [          7:0] weights     [0:KERNEL_COUNT-1] [0:8];
     logic signed [BIAS_BITS-1:0] bias        [0:KERNEL_COUNT-1];
 
+    logic        [   SCALE_M_BITS-1:0] quant_scale_mult  [0:KERNEL_COUNT-1];
+    logic signed [ACTIVATION_BITS-1:0] quant_offset;
+    logic signed [ACTIVATION_BITS-1:0] prev_quant_offset;
+
     logic              done;
     logic              output_valid;
     logic signed [7:0] quantized_value[0:KERNEL_COUNT-1];
@@ -45,28 +49,31 @@ module first_layer_convolve_3x3_fsm_tb;
         .IMG_ROWS    (IMG_ROWS),
         .KERNEL_COUNT(KERNEL_COUNT)
     ) dut (
-        .clk            (clk),
-        .rst_n          (rst_n),
-        .start          (start),
-        .pixel_valid    (pixel_valid),
-        .input_pixel    (input_pixel),
-        .weights        (weights),
-        .bias           (bias),
-        .done           (done),
-        .output_valid   (output_valid),
-        .quantized_value(quantized_value)
+        .clk              (clk),
+        .rst_n            (rst_n),
+        .start            (start),
+        .pixel_valid      (pixel_valid),
+        .input_pixel      (input_pixel),
+        .weights          (weights),
+        .bias             (bias),
+        .quant_scale_mult (quant_scale_mult),
+        .quant_offset     (quant_offset),
+        .prev_quant_offset(prev_quant_offset),
+        .done             (done),
+        .output_valid     (output_valid),
+        .quantized_value  (quantized_value)
     );
 
     initial clk = 1'b0;
     always #5 clk = ~clk;
 
-    logic        [                                7:0] picture [NUM_PIXELS];
-    logic signed [(ACTIVATION_WIDTH*KERNEL_COUNT)-1:0] expected[NUM_PIXELS];
+    logic        [                               7:0] picture [NUM_PIXELS];
+    logic signed [(ACTIVATION_BITS*KERNEL_COUNT)-1:0] expected[NUM_PIXELS];
 
     // Every valid output gets pushed here, checked after the frame is done
-    logic signed [(ACTIVATION_WIDTH*KERNEL_COUNT)-1:0] scoreboard[$];
+    logic signed [(ACTIVATION_BITS*KERNEL_COUNT)-1:0] scoreboard[$];
 
-    logic [(ACTIVATION_WIDTH*KERNEL_COUNT)-1:0] packed_outputs;
+    logic [(ACTIVATION_BITS*KERNEL_COUNT)-1:0] packed_outputs;
 
     always @(posedge clk) begin
         if (output_valid) begin
@@ -79,11 +86,12 @@ module first_layer_convolve_3x3_fsm_tb;
     // Sends the picture one pixel per cycle with pixel_valid high
     task send_frame();
         for (int i = 0; i < NUM_PIXELS; i++) begin
-            pixel_valid <= 1'b1;
-            input_pixel <= picture[i];
-            @(posedge clk);
+            @(negedge clk);
+            pixel_valid = 1'b1;
+            input_pixel = picture[i];
         end
-        pixel_valid <= 1'b0;
+        @(negedge clk);
+        pixel_valid = 1'b0;
     endtask
 
     integer num_errors;
@@ -92,8 +100,10 @@ module first_layer_convolve_3x3_fsm_tb;
         $readmemb(PICTURE_PATH, picture);
         $readmemb(RESULT_PATH, expected);
 
-        // First layer weights from weights.mem, kernel k is bytes 13*k to 13*k+8
-        // (each kernel's 9 weights are followed by its 4 byte bias)
+        // First layer's integer inference buffers from the MNIST model,
+        // matching model/export_image.py and the first_layer vectors.
+        // Don't have a good pipeline for this yet other than looking at
+        // the exported .mem file or inspecting the model through Python.
         weights[0] = '{-8'sd22, -8'sd63, -8'sd128, -8'sd55, -8'sd47, 8'sd35, 8'sd70, 8'sd111, 8'sd63};
         weights[1] = '{8'sd54, -8'sd63, -8'sd79, -8'sd128, -8'sd119, -8'sd13, -8'sd63, 8'sd36, 8'sd116};
         weights[2] = '{-8'sd61, -8'sd17, 8'sd73, 8'sd107, 8'sd34, 8'sd119, 8'sd24, 8'sd59, 8'sd127};
@@ -103,23 +113,30 @@ module first_layer_convolve_3x3_fsm_tb;
         weights[6] = '{8'sd127, 8'sd70, 8'sd123, -8'sd82, -8'sd42, 8'sd10, -8'sd58, -8'sd54, -8'sd120};
         weights[7] = '{8'sd69, 8'sd96, 8'sd43, 8'sd64, 8'sd82, 8'sd96, 8'sd127, -8'sd10, -8'sd11};
 
+        // full_bias includes the input-zero-point correction; do not use raw biases.
+        bias = '{2563, -15626, 77748, -41946, 27742, 69488, 1310, 71199};
+        quant_scale_mult = '{151, 124, 97, 88, 95, 106, 103, 113};
+        quant_offset = ACTIVATION_BITS'(-128);
+        prev_quant_offset = ACTIVATION_BITS'(-128);
+
         rst_n       = 1'b0;
         start       = 1'b0;
         pixel_valid = 1'b0;
         input_pixel = '0;
 
-        repeat (3) @(posedge clk);
-        rst_n <= 1'b1;
+        repeat (3) @(negedge clk);
+        rst_n = 1'b1;
 
-        @(posedge clk);
-        start <= 1'b1;
-        @(posedge clk);
-        start <= 1'b0;
+        @(negedge clk);
+        start = 1'b1;
+        @(negedge clk);
+        start = 1'b0;
 
         send_frame();
 
-        // The last output comes out a couple of cycles after done
-        repeat (5) @(posedge clk);
+        @(posedge done);
+        @(posedge clk);
+        @(negedge clk);
 
         num_errors = 0;
         if (scoreboard.size() != NUM_PIXELS) begin
@@ -133,8 +150,8 @@ module first_layer_convolve_3x3_fsm_tb;
                     $display(
                         "MISS output %0d (row %0d, col %0d) | got %0d | want %0d",
                         i,
-                        i / (IMG_COLS - 2),
-                        i % (IMG_COLS - 2),
+                        i / IMG_COLS,
+                        i % IMG_COLS,
                         scoreboard[i],
                         expected[i]
                     );
@@ -147,6 +164,11 @@ module first_layer_convolve_3x3_fsm_tb;
         end else begin
             $fatal(1, "CONVOLVE_3x3_FSM TB: FAIL -- %0d outputs, %0d errors", NUM_PIXELS, num_errors);
         end
+    end
+
+    initial begin
+        repeat (2 * NUM_PIXELS + 4 * IMG_COLS + 100) @(posedge clk);
+        $fatal(1, "CONVOLVE_3x3_FSM TB: timed out waiting for frame completion");
     end
 
 endmodule

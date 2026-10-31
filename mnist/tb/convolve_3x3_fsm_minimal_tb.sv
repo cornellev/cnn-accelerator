@@ -9,36 +9,36 @@ module convolve_3x3_fsm_minimal_tb;
     logic clk = 1'b0;
     always #5 clk = ~clk;
 
-    logic rst_n = 1'b0;
-    logic start = 1'b0;
-    logic pixel_valid = 1'b0;
+    logic                              rst_n = 1'b0;
+    logic                              start = 1'b0;
+    logic                              pixel_valid = 1'b0;
     logic signed [ACTIVATION_BITS-1:0] input_pixel = '0;
-    logic signed [WEIGHT_BITS-1:0] weights[0:0][0:8];
-    logic signed [BIAS_BITS-1:0] bias[0:0];
-    logic [SCALE_M_BITS-1:0] quant_scale_mult[0:0];
+    logic signed [    WEIGHT_BITS-1:0] weights                [0:0] [0:8];
+    logic signed [      BIAS_BITS-1:0] bias                   [0:0];
+    logic        [   SCALE_M_BITS-1:0] quant_scale_mult       [0:0];
     logic signed [ACTIVATION_BITS-1:0] quant_offset = -8;
     logic signed [ACTIVATION_BITS-1:0] prev_quant_offset = -3;
     logic done, output_valid;
     logic signed [ACTIVATION_BITS-1:0] quantized_value[0:0];
 
     convolve_3x3_fsm #(
-        .IMG_COLS(IMG_COLS),
-        .IMG_ROWS(IMG_ROWS),
+        .IMG_COLS    (IMG_COLS),
+        .IMG_ROWS    (IMG_ROWS),
         .KERNEL_COUNT(1)
     ) dut (
-        .clk(clk),
-        .rst_n(rst_n),
-        .start(start),
-        .pixel_valid(pixel_valid),
-        .input_pixel(input_pixel),
-        .weights(weights),
-        .bias(bias),
-        .quant_scale_mult(quant_scale_mult),
-        .quant_offset(quant_offset),
+        .clk              (clk),
+        .rst_n            (rst_n),
+        .start            (start),
+        .pixel_valid      (pixel_valid),
+        .input_pixel      (input_pixel),
+        .weights          (weights),
+        .bias             (bias),
+        .quant_scale_mult (quant_scale_mult),
+        .quant_offset     (quant_offset),
         .prev_quant_offset(prev_quant_offset),
-        .done(done),
-        .output_valid(output_valid),
-        .quantized_value(quantized_value)
+        .done             (done),
+        .output_valid     (output_valid),
+        .quantized_value  (quantized_value)
     );
 
     // verilog_format: off
