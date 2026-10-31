@@ -9,11 +9,13 @@
 
 `include "rtl/quant_params.sv"
 
+`ifndef _MAX_POOLING_FSM_SV_
+`define _MAX_POOLING_FSM_SV_
+
 module max_pooling_fsm #(
     parameter IMG_COLS      = 320,
     parameter IMG_ROWS      = 320,
     parameter CHANNEL_COUNT = 8
-
 ) (
     input logic clk,
     input logic rst_n,
@@ -43,7 +45,22 @@ module max_pooling_fsm #(
         end
     end
 
-    assign done = accept_pixel && (row_count == IMG_ROWS - 1) && (col_count == IMG_COLS - 1);
+    // Output valid counter
+    localparam int NUM_OUTPUTS = (IMG_COLS / 2) * (IMG_ROWS / 2);
+    localparam int NUM_OUTPUTS_WIDTH = $clog2(NUM_OUTPUTS);
+
+    logic [NUM_OUTPUTS_WIDTH-1:0] valid_output_count;
+
+    always_ff @(posedge clk) begin
+        if (!rst_n || start) begin
+            valid_output_count <= '0;
+        end
+        else if (output_valid) begin
+            valid_output_count <= valid_output_count + 1'b1;
+        end
+    end
+
+    assign done = (valid_output_count == NUM_OUTPUTS);
 
     // Next state logic
     always_comb begin : next_state_logic
@@ -137,7 +154,7 @@ module max_pooling_fsm #(
 
     end
 
-    logic signed [ACTIVATION_BITS-1:0] pixel_row_read[0:CHANNEL_COUNT-1][0];
+    logic signed [ACTIVATION_BITS-1:0] pixel_row_read[0:CHANNEL_COUNT-1][0:0];
 
     // One set of row buffers per channel, all using the same addresses
     for (genvar c = 0; c < CHANNEL_COUNT; c++) begin : generate_channel_row_buffers
@@ -164,7 +181,8 @@ module max_pooling_fsm #(
             window_ready_delayed <= 1'b0;
             output_valid         <= 1'b0;
         end else begin
-            window_ready_delayed <= accept_pixel && (row_count >= 1) && (col_count >= 1);
+            window_ready_delayed <= accept_pixel && ((row_count % 2) == 1'b1) && (row_count >= 1) &&
+                                                    ((col_count % 2) == 1'b1) && (col_count >= 1);
             output_valid <= window_ready_delayed;
         end
     end
@@ -200,3 +218,5 @@ module max_pooling_fsm #(
     end
 
 endmodule
+
+`endif  // _MAX_POOLING_FSM_SV_
