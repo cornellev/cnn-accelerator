@@ -165,9 +165,30 @@ def write_picture_vectors(picture_directory: Path, vector_directory: Path) -> No
         for value in expected.flatten().tolist():
             file.write(bits(value, ACTIVATION_BITS) + "\n")
 
+    # Pool the input picture directly, using non-overlapping 2x2 windows.
+    pooled = torch.nn.functional.max_pool2d(inputs, 2, stride=2)
+    pooled_path = vector_directory / "mnist-4-maxpool-output.txt"
+    with pooled_path.open("w") as file:
+        for value in pooled.flatten().tolist():
+            file.write(bits(value, ACTIVATION_BITS) + "\n")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--vectors", action="store_true", help="Generate raw convolution vectors"
+    )
+    parser.add_argument(
+        "--quantized-vectors",
+        action="store_true",
+        help="Generate quantized convolution vectors",
+    )
+    parser.add_argument(
+        "--picture",
+        action="store_true",
+        help="Generate picture input, convolution output, and 2x2 max-pooling output",
+    )
+    parser.epilog = "If no output flags are given, generate all outputs."
     parser.add_argument("--num-vectors", type=int, default=100000)
     parser.add_argument("--seed", type=int, default=1)
     args = parser.parse_args()
@@ -180,11 +201,15 @@ def main() -> None:
     directory = ROOT / "tb" / "vectors"
     directory.mkdir(parents=True, exist_ok=True)
 
-    write_raw_vectors(directory / "convolve_vectors.txt", args.num_vectors, args.seed)
-    write_quantized_vectors(
-        directory / "quantized_convolve_vectors.txt", args.num_vectors, args.seed
-    )
-    write_picture_vectors(ROOT / "tb" / "picture", directory)
+    run_all = not (args.vectors or args.quantized_vectors or args.picture)
+    if args.vectors or run_all:
+        write_raw_vectors(directory / "convolve_vectors.txt", args.num_vectors, args.seed)
+    if args.quantized_vectors or run_all:
+        write_quantized_vectors(
+            directory / "quantized_convolve_vectors.txt", args.num_vectors, args.seed
+        )
+    if args.picture or run_all:
+        write_picture_vectors(ROOT / "tb" / "picture", directory)
 
 
 if __name__ == "__main__":
