@@ -28,8 +28,9 @@ module convolve_3x3_3d_fsm #(
     input logic signed [WEIGHT_BITS-1:0] weights[0:KERNEL_COUNT-1][0:CHANNEL_COUNT-1][0:8],
     input logic signed [  BIAS_BITS-1:0] bias   [0:KERNEL_COUNT-1],
 
-    input logic        [   SCALE_M_BITS-1:0] quant_scale_mult[0:KERNEL_COUNT-1],
+    input logic        [   SCALE_M_BITS-1:0] quant_scale_mult [0:KERNEL_COUNT-1],
     input logic signed [ACTIVATION_BITS-1:0] quant_offset,
+    input logic signed [ACTIVATION_BITS-1:0] prev_quant_offset,
 
     output logic                              output_valid,
     output logic                              done,
@@ -38,7 +39,9 @@ module convolve_3x3_3d_fsm #(
 
     typedef enum logic [2:0] {
         ST_IDLE,
-        ST_BUSY
+        ST_BUSY_PREFILL,
+        ST_BUSY_COMPUTE,
+        ST_BUSY_FINISH
     } state_t;
 
     state_t current_state, next_state;
@@ -52,19 +55,29 @@ module convolve_3x3_3d_fsm #(
         end
     end
 
-    assign done = accept_pixel && (row_count == IMG_ROWS - 1) && (col_count == IMG_COLS - 1);
-
     // Next state logic
     always_comb begin : next_state_logic
         next_state = current_state;
         case (current_state)
             ST_IDLE: begin
                 if (start) begin
-                    next_state = ST_BUSY;
+                    next_state = ST_BUSY_PREFILL;
                 end
             end
 
-            ST_BUSY: begin
+            ST_BUSY_PREFILL: begin
+                if (next_prefill_done) begin
+                    next_state = ST_BUSY_COMPUTE;
+                end
+            end
+
+            ST_BUSY_COMPUTE: begin
+                if (is_last_input) begin
+                    next_state = ST_BUSY_FINISH;
+                end
+            end
+
+            ST_BUSY_FINISH: begin
                 if (done) begin
                     next_state = ST_IDLE;
                 end
@@ -74,72 +87,79 @@ module convolve_3x3_3d_fsm #(
         endcase
     end
 
-    logic busy;
-    logic row_col_count_enable;
+    logic advance_buffer;
 
     // Output logic
     always_comb begin : output_logic
         case (current_state)
             ST_IDLE: begin
-                busy                 = 1'b0;
-                row_col_count_enable = 1'b0;
+                advance_buffer = 1'b0;
             end
 
-            ST_BUSY: begin
-                busy                 = 1'b1;
-                // only increment counter for valid pixels
-                row_col_count_enable = pixel_valid;
+            ST_BUSY_PREFILL, ST_BUSY_COMPUTE: begin
+                advance_buffer = pixel_valid;
+            end
+
+            ST_BUSY_FINISH: begin
+                advance_buffer = 1'b1;
             end
 
             default: begin
-                busy                 = 1'b0;
-                row_col_count_enable = 1'b0;
+                advance_buffer = 1'b0;
             end
         endcase
     end
 
-    localparam ROW_COUNT_WIDTH = $clog2(IMG_ROWS);
+    // The finish phase advances the buffer beyond the input image.
+    localparam ROW_COUNT_WIDTH = $clog2(IMG_ROWS + 2);
     localparam COL_COUNT_WIDTH = $clog2(IMG_COLS);
 
-    logic [ROW_COUNT_WIDTH-1:0] row_count;
-    logic [COL_COUNT_WIDTH-1:0] col_count;
+    localparam logic [ROW_COUNT_WIDTH-1:0] LAST_ROW = ROW_COUNT_WIDTH'(IMG_ROWS - 1);
+    localparam logic [COL_COUNT_WIDTH-1:0] LAST_COL = COL_COUNT_WIDTH'(IMG_COLS - 1);
 
-    always_ff @(posedge clk) begin : row_col_counter
+    logic [ROW_COUNT_WIDTH-1:0] buffer_row;
+    logic [COL_COUNT_WIDTH-1:0] buffer_col;
+    logic [ROW_COUNT_WIDTH-1:0] buffer_row_delayed;
+    logic [COL_COUNT_WIDTH-1:0] buffer_col_delayed;
+
+    always_ff @(posedge clk) begin : buffer_pos
         if (!rst_n || start) begin
-            row_count <= '0;
-            col_count <= '0;
-        end else if (row_col_count_enable) begin
-            if ((row_count == IMG_ROWS - 1) && (col_count == IMG_COLS - 1)) begin
-                row_count <= '0;
-                col_count <= '0;
-            end else if (col_count == IMG_COLS - 1) begin
-                row_count <= row_count + 1'b1;
-                col_count <= '0;
+            buffer_row <= '0;
+            buffer_col <= '0;
+            buffer_row_delayed <= '0;
+            buffer_col_delayed <= '0;
+        end else if (advance_buffer) begin
+            if (buffer_col == LAST_COL) begin
+                buffer_row <= buffer_row + 1'b1;
+                buffer_col <= '0;
             end else begin
-                row_count <= row_count;
-                col_count <= col_count + 1'b1;
+                buffer_col <= buffer_col + 1'b1;
             end
+            buffer_row_delayed <= buffer_row;
+            buffer_col_delayed <= buffer_col;
         end
     end
 
-    logic        [COL_COUNT_WIDTH-1:0] col_count_delayed;
-    logic signed [ACTIVATION_BITS-1:0] input_pixel_delayed[0:CHANNEL_COUNT-1];
-    logic                              accept_pixel_delayed;
-    logic                              accept_pixel;
+    logic next_prefill_done;
+    assign next_prefill_done = advance_buffer_delayed && buffer_row_delayed == 1 && buffer_col_delayed == 1;
 
-    assign accept_pixel = busy && pixel_valid;
+    logic is_last_input;
+    assign is_last_input = advance_buffer && buffer_col == LAST_COL && buffer_row == LAST_ROW;
+
+    assign done = window_valid && window_row == LAST_ROW && window_col == LAST_COL;
+
+    logic signed [ACTIVATION_BITS-1:0] input_pixel_delayed    [0:CHANNEL_COUNT-1];
+    logic                              advance_buffer_delayed;
 
     always_ff @(posedge clk) begin : buffer_delay_register
-        if (!rst_n) begin
-            col_count_delayed    <= '0;
-            accept_pixel_delayed <= '0;
+        if (!rst_n || start) begin
+            advance_buffer_delayed <= '0;
             for (int c = 0; c < CHANNEL_COUNT; c++) begin
                 input_pixel_delayed[c] <= '0;
             end
         end else begin
-            accept_pixel_delayed <= accept_pixel;
-            if (accept_pixel) begin
-                col_count_delayed   <= col_count;
+            advance_buffer_delayed <= advance_buffer;
+            if (advance_buffer) begin
                 input_pixel_delayed <= input_pixel;
             end
         end
@@ -156,27 +176,15 @@ module convolve_3x3_3d_fsm #(
         ) pixel_row_buffers (
             .clk    (clk),
             .rst_n  (rst_n),
-            .wr_addr(col_count_delayed),
+            .wr_addr(buffer_col_delayed),
             .wr_data(input_pixel_delayed[c]),
-            .wr_en  (accept_pixel_delayed),
-            .rd_en  (accept_pixel),
-            .rd_addr(col_count),
+            .wr_en  (advance_buffer_delayed),
+            .rd_en  (advance_buffer),
+            .rd_addr(buffer_col),
             .rd_data(pixel_row_read[c])
         );
     end
 
-    // Window valid check
-    logic window_ready_delayed;
-
-    always_ff @(posedge clk) begin : window_center_valid
-        if (!rst_n || start) begin
-            window_ready_delayed <= 1'b0;
-            output_valid         <= 1'b0;
-        end else begin
-            window_ready_delayed <= accept_pixel && (row_count >= 2) && (col_count >= 2);
-            output_valid <= window_ready_delayed;
-        end
-    end
     logic signed [ACTIVATION_BITS-1:0] window_pixels[0:CHANNEL_COUNT-1][0:8];
 
     always_ff @(posedge clk) begin : channel_window_register
@@ -186,7 +194,7 @@ module convolve_3x3_3d_fsm #(
                     window_pixels[c][i] <= '0;
                 end
             end
-        end else if (accept_pixel_delayed) begin
+        end else if (advance_buffer_delayed) begin
             for (int c = 0; c < CHANNEL_COUNT; c++) begin
                 window_pixels[c][0] <= window_pixels[c][1];
                 window_pixels[c][1] <= window_pixels[c][2];
@@ -203,11 +211,72 @@ module convolve_3x3_3d_fsm #(
         end
     end
 
+    logic next_window_valid;
+    assign next_window_valid = advance_buffer_delayed && (next_state == ST_BUSY_COMPUTE || next_state == ST_BUSY_FINISH);
+
+    logic window_valid;
+    always_ff @(posedge clk) begin : window_valid_update
+        if (!rst_n || start) begin
+            window_valid <= '0;
+        end else begin
+            window_valid <= next_window_valid;
+        end
+    end
+
+    assign output_valid = window_valid;
+
+    logic [ROW_COUNT_WIDTH-1:0] window_row;
+    logic [COL_COUNT_WIDTH-1:0] window_col;
+    always_ff @(posedge clk) begin : window_pos
+        if (!rst_n || start) begin
+            window_row <= '0;
+            window_col <= '0;
+        end else if (next_window_valid) begin
+            if (buffer_col_delayed == 0) begin
+                window_row <= buffer_row_delayed - 2;
+                window_col <= LAST_COL;
+            end else begin
+                window_row <= buffer_row_delayed - 1;
+                window_col <= buffer_col_delayed - 1;
+            end
+        end
+    end
+
+    // Mask image borders with the previous layer's quantized zero point.
+    logic signed [ACTIVATION_BITS-1:0] masked_window_pixels[0:CHANNEL_COUNT-1][0:8];
+    always_comb begin : mask_window
+        for (int c = 0; c < CHANNEL_COUNT; c++) begin
+            for (int i = 0; i < 9; i++) begin
+                masked_window_pixels[c][i] = window_pixels[c][i];
+            end
+            if (window_row == 0) begin
+                masked_window_pixels[c][0] = prev_quant_offset;
+                masked_window_pixels[c][1] = prev_quant_offset;
+                masked_window_pixels[c][2] = prev_quant_offset;
+            end
+            if (window_col == 0) begin
+                masked_window_pixels[c][0] = prev_quant_offset;
+                masked_window_pixels[c][3] = prev_quant_offset;
+                masked_window_pixels[c][6] = prev_quant_offset;
+            end
+            if (window_row == LAST_ROW) begin
+                masked_window_pixels[c][6] = prev_quant_offset;
+                masked_window_pixels[c][7] = prev_quant_offset;
+                masked_window_pixels[c][8] = prev_quant_offset;
+            end
+            if (window_col == LAST_COL) begin
+                masked_window_pixels[c][2] = prev_quant_offset;
+                masked_window_pixels[c][5] = prev_quant_offset;
+                masked_window_pixels[c][8] = prev_quant_offset;
+            end
+        end
+    end
+
     for (genvar i = 0; i < KERNEL_COUNT; i++) begin : generate_kernel
         quantized_convolution_3d #(
             .K(CHANNEL_COUNT)
         ) kernel (
-            .pixels          (window_pixels),
+            .pixels          (masked_window_pixels),
             .weights         (weights[i]),
             .full_bias       (bias[i]),
             .quant_scale_mult(quant_scale_mult[i]),
