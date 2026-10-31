@@ -136,7 +136,7 @@ def write_quantized_vectors(path: Path, count: int, seed: int) -> None:
 
 @torch.inference_mode()
 def write_picture_vectors(picture_directory: Path, vector_directory: Path) -> None:
-    with Image.open(picture_directory / "calibration_board.png") as image:
+    with Image.open(picture_directory / "mnist-4.png") as image:
         image = image.convert("L")
         width, height = image.size
 
@@ -155,14 +155,12 @@ def write_picture_vectors(picture_directory: Path, vector_directory: Path) -> No
     # The FSM emits SAME-padded output, including all four borders.
     expected = outputs[0, 0]
 
-    picture_path = picture_directory / "calibration_board.txt"
+    picture_path = picture_directory / "mnist-4.txt"
     with picture_path.open("w") as file:
         for value in pixels.flatten().tolist():
             file.write(bits(value, ACTIVATION_BITS) + "\n")
 
-    expected_path = (
-        vector_directory / "quantized_convolution_calibration_board_vectors.txt"
-    )
+    expected_path = vector_directory / "mnist-4-quantized-output.txt"
     with expected_path.open("w") as file:
         for value in expected.flatten().tolist():
             file.write(bits(value, ACTIVATION_BITS) + "\n")

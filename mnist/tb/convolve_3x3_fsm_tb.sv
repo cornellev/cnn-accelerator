@@ -19,14 +19,14 @@
 
 module convolve_3x3_fsm_tb;
 
-    localparam int IMG_COLS = 314;
-    localparam int IMG_ROWS = 314;
+    localparam int IMG_COLS = 28;
+    localparam int IMG_ROWS = 28;
     localparam int KERNEL_COUNT = 1;
 
     localparam int NUM_PIXELS = IMG_ROWS * IMG_COLS;
 
-    localparam string PICTURE_PATH = "tb/picture/calibration_board.txt";
-    localparam string RESULT_PATH  = "tb/vectors/quantized_convolution_calibration_board_vectors.txt";
+    localparam string PICTURE_PATH = "tb/picture/mnist-4.txt";
+    localparam string RESULT_PATH  = "tb/vectors/mnist-4-quantized-output.txt";
 
     logic                              clk;
     logic                              rst_n;
