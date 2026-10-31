@@ -141,6 +141,8 @@ def write_picture_vectors(picture_directory: Path, vector_directory: Path) -> No
         width, height = image.size
 
         # Center the unsigned image samples into signed activation storage.
+        # This relies on the fact that we have a constant input quantization
+        # in quantize_custom.py that maps the 0-1 float range to -128-127.
         pixels = torch.tensor(list(image.tobytes()), dtype=torch.int32)
         pixels = pixels.reshape(height, width) - 128
 
@@ -150,14 +152,17 @@ def write_picture_vectors(picture_directory: Path, vector_directory: Path) -> No
 
     inputs = pixels.to(torch.int8).reshape(1, 1, height, width)
     outputs = module(inputs)
-    expected = outputs[0, 0, 1:-1, 1:-1]
+    # The FSM emits SAME-padded output, including all four borders.
+    expected = outputs[0, 0]
 
     picture_path = picture_directory / "calibration_board.txt"
     with picture_path.open("w") as file:
         for value in pixels.flatten().tolist():
             file.write(bits(value, ACTIVATION_BITS) + "\n")
 
-    expected_path = vector_directory / "quantized_convolution_calibration_board_vectors.txt"
+    expected_path = (
+        vector_directory / "quantized_convolution_calibration_board_vectors.txt"
+    )
     with expected_path.open("w") as file:
         for value in expected.flatten().tolist():
             file.write(bits(value, ACTIVATION_BITS) + "\n")
