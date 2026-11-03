@@ -3,6 +3,7 @@
 #   make                    build and run every testbench in tb/
 #   make convolve_3x3_fsm   build and run one testbench (tb/<name>_tb.sv)
 #   make vectors            regenerate the test vectors in tb/vectors
+#   make test-mnist         compare RTL + classifier logits with the PyTorch model
 #   make clean              delete the build output in target/
 
 # Vector generation imports the quantization reference and its torch dependencies.
@@ -15,7 +16,7 @@ TBS := $(patsubst tb/%_tb.sv,%,$(wildcard tb/*_tb.sv))
 # Warnings still print, they just don't stop the build
 VERILATOR_FLAGS := --binary -j 0 -Wno-fatal -Wno-DECLFILENAME
 
-.PHONY: all vectors clean $(TBS)
+.PHONY: all vectors clean test-mnist $(TBS)
 
 all: $(TBS)
 
@@ -25,6 +26,9 @@ $(TBS): %: $(BUILD)/%/sim
 
 $(BUILD)/%/sim: tb/%_tb.sv $(RTL)
 	verilator $(VERILATOR_FLAGS) --binary --trace --top-module $*_tb -Mdir $(BUILD)/$* -o sim $< $(RTL)
+
+test-mnist:
+	$(PYTHON) -m scripts.test_mnist
 
 vectors:
 	$(PYTHON) -m scripts.convolve_3x3_vectors

@@ -24,6 +24,7 @@ explicit = true
 
 [dependency-groups]
 dev = [
+    "cocotb>=2.0,<3",
     "debugpy>=1.8.22",
     "pytest>=9.1.1",
 ]
