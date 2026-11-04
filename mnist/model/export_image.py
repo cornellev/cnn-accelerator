@@ -7,10 +7,6 @@ Have not reviewed for code quality but seems to be correct
 import argparse
 from pathlib import Path
 
-if __name__ == "__main__":
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch
 from PIL import Image
