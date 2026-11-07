@@ -7,43 +7,20 @@ Have not reviewed for code quality but seems to be correct
 import argparse
 from pathlib import Path
 
+
 import torch
 from PIL import Image
 from torchvision import datasets, transforms
 
-from quantize_custom import QuantizeActivation, QuantizedConvRelu2d
-
 
 def load_first_layer(checkpoint: Path) -> torch.nn.Sequential:
     """Restore the input quantizer and first Conv/ReLU from a custom checkpoint."""
-    state = torch.load(checkpoint, map_location="cpu", weights_only=True)
-    quantizer_name = "quantization_marker_inputs"
-    conv_name = "fused_features_0_features_1"
-    quantizer = QuantizeActivation(
-        state[f"{quantizer_name}.scale"], state[f"{quantizer_name}.zero"]
-    )
-    conv_state = {
-        key.removeprefix(f"{conv_name}."): value
-        for key, value in state.items()
-        if key.startswith(f"{conv_name}.")
-    }
-    weights = conv_state["weights"]
-    if weights.shape != (8, 1, 3, 3) or weights.dtype != torch.int8:
-        raise ValueError("Expected an int8 first convolution with shape (8, 1, 3, 3)")
-
-    # Original floating-point weight/output scales are not saved. Initialize
-    # placeholders, then restore the exact integer inference buffers below.
-    conv = QuantizedConvRelu2d(
-        weights=weights,
-        bias=torch.zeros(8, dtype=torch.int32),
-        w_scale=torch.zeros(8),
-        x_scale=quantizer.scale,
-        x_zero=conv_state["x_zero"],
-        y_scale=torch.tensor(1.0),
-        y_zero=conv_state["y_zero"],
-    )
-    conv.load_state_dict(conv_state, strict=True)
-    return torch.nn.Sequential(quantizer, conv).eval()
+    # Whole-model checkpoints use pickle; only load trusted files.
+    model = torch.load(checkpoint, map_location="cpu", weights_only=False).eval()
+    return torch.nn.Sequential(
+        model.get_submodule("quantization_marker_inputs"),
+        model.get_submodule("fused_features_0_features_1"),
+    ).eval()
 
 
 def write_binary_images(

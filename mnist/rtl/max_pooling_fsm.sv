@@ -21,12 +21,12 @@ module max_pooling_fsm #(
     input logic rst_n,
     input logic start,
 
-    input logic                               pixel_valid,
-    input logic signed [ACTIVATION_BITS-1:0]  input_pixel [0:CHANNEL_COUNT-1],
+    input logic                              pixel_valid,
+    input logic signed [ACTIVATION_BITS-1:0] input_pixel[0:CHANNEL_COUNT-1],
 
     output logic                              output_valid,
     output logic                              done,
-    output logic signed [ACTIVATION_BITS-1:0] max_value [0:CHANNEL_COUNT-1]
+    output logic signed [ACTIVATION_BITS-1:0] max_value   [0:CHANNEL_COUNT-1]
 );
 
     typedef enum logic [2:0] {
@@ -54,8 +54,7 @@ module max_pooling_fsm #(
     always_ff @(posedge clk) begin
         if (!rst_n || start) begin
             valid_output_count <= '0;
-        end
-        else if (output_valid) begin
+        end else if (output_valid) begin
             valid_output_count <= valid_output_count + 1'b1;
         end
     end
@@ -131,7 +130,7 @@ module max_pooling_fsm #(
     end
 
     logic        [COL_COUNT_WIDTH-1:0] col_count_delayed;
-    logic signed [ACTIVATION_BITS-1:0] input_pixel_delayed[0:CHANNEL_COUNT-1];
+    logic signed [ACTIVATION_BITS-1:0] input_pixel_delayed  [0:CHANNEL_COUNT-1];
     logic                              accept_pixel_delayed;
     logic                              accept_pixel;
 
@@ -207,13 +206,12 @@ module max_pooling_fsm #(
     end
 
     for (genvar i = 0; i < CHANNEL_COUNT; i++) begin : generate_max_pools
-        max_pooling pool 
-        (
-            .input_pixel_1 (window_pixels[i][0]),
-            .input_pixel_2 (window_pixels[i][1]),
-            .input_pixel_3 (window_pixels[i][2]),
-            .input_pixel_4 (window_pixels[i][3]),
-            .max_pixel     (max_value[i])
+        max_pooling pool (
+            .input_pixel_1(window_pixels[i][0]),
+            .input_pixel_2(window_pixels[i][1]),
+            .input_pixel_3(window_pixels[i][2]),
+            .input_pixel_4(window_pixels[i][3]),
+            .max_pixel    (max_value[i])
         );
     end
 

@@ -708,8 +708,12 @@ def main() -> None:
     if args.export_format == "mem":
         export_mem(quantized_model, args.output)
     else:
-        torch.save(quantized_model.state_dict(), args.output)
+        torch.save(quantized_model, args.output)
 
 
 if __name__ == "__main__":
-    main()
+    # We need to do this weirdness so pickling layers works correctly when
+    # we load the model in other scripts.
+    from model.quantize_custom import main as export_main
+
+    export_main()

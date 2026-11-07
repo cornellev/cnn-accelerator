@@ -11,7 +11,10 @@ From `mnist/model`, run:
 uv run python quantize_custom.py --export-format mem --output weights.mem
 ```
 
-`--export-format torch` (the default) saves the PyTorch state dictionary instead.
+`--export-format torch` (the default) saves the complete quantized model,
+including pickled layers (so you can just load it and run it if you trust
+the file)
+
 Without `--output`, the filename is `mnist_cnn_int8.pt` or `mnist_cnn_int8.mem`.
 
 The memory export produces `weights.mem` and `weights.json`:
