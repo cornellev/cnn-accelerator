@@ -17,6 +17,8 @@
 module mnist_fpga_fsm (
     input  clk,
     input  rst_n,
+
+    output       output_valid,
     output [3:0] num_output
 );
 
