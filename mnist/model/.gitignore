@@ -6,3 +6,5 @@ data/
 *.mem
 *.json
 image_export/
+!mnist_cnn_int8.json
+!mnist_cnn_int8.mem

@@ -1,0 +1,662 @@
+{
+  "scale_approx_bits": 16,
+  "input_quantization": [
+    {
+      "name": "quantization_marker_inputs",
+      "scale": 0.003921568859368563,
+      "zero": -128
+    }
+  ],
+  "layers": [
+    {
+      "name": "fused_features_0_features_1",
+      "type": "QuantizedConvRelu2d",
+      "offset": 0,
+      "length": 138,
+      "weight_shape": [
+        8,
+        1,
+        3,
+        3
+      ],
+      "kernels": [
+        {
+          "output_channel": 0,
+          "weights": {
+            "offset": 0,
+            "length": 9,
+            "shape": [
+              1,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 9,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 1,
+          "weights": {
+            "offset": 13,
+            "length": 9,
+            "shape": [
+              1,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 22,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 2,
+          "weights": {
+            "offset": 26,
+            "length": 9,
+            "shape": [
+              1,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 35,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 3,
+          "weights": {
+            "offset": 39,
+            "length": 9,
+            "shape": [
+              1,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 48,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 4,
+          "weights": {
+            "offset": 52,
+            "length": 9,
+            "shape": [
+              1,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 61,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 5,
+          "weights": {
+            "offset": 65,
+            "length": 9,
+            "shape": [
+              1,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 74,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 6,
+          "weights": {
+            "offset": 78,
+            "length": 9,
+            "shape": [
+              1,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 87,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 7,
+          "weights": {
+            "offset": 91,
+            "length": 9,
+            "shape": [
+              1,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 100,
+            "length": 4,
+            "shape": []
+          }
+        }
+      ],
+      "quantization": {
+        "approx_m": {
+          "offset": 104,
+          "length": 32,
+          "shape": [
+            8
+          ]
+        },
+        "x_zero": {
+          "offset": 136,
+          "length": 1,
+          "shape": []
+        },
+        "y_zero": {
+          "offset": 137,
+          "length": 1,
+          "shape": []
+        }
+      }
+    },
+    {
+      "name": "fused_features_3_features_4",
+      "type": "QuantizedConvRelu2d",
+      "offset": 138,
+      "length": 1282,
+      "weight_shape": [
+        16,
+        8,
+        3,
+        3
+      ],
+      "kernels": [
+        {
+          "output_channel": 0,
+          "weights": {
+            "offset": 138,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 210,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 1,
+          "weights": {
+            "offset": 214,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 286,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 2,
+          "weights": {
+            "offset": 290,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 362,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 3,
+          "weights": {
+            "offset": 366,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 438,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 4,
+          "weights": {
+            "offset": 442,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 514,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 5,
+          "weights": {
+            "offset": 518,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 590,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 6,
+          "weights": {
+            "offset": 594,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 666,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 7,
+          "weights": {
+            "offset": 670,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 742,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 8,
+          "weights": {
+            "offset": 746,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 818,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 9,
+          "weights": {
+            "offset": 822,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 894,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 10,
+          "weights": {
+            "offset": 898,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 970,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 11,
+          "weights": {
+            "offset": 974,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 1046,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 12,
+          "weights": {
+            "offset": 1050,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 1122,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 13,
+          "weights": {
+            "offset": 1126,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 1198,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 14,
+          "weights": {
+            "offset": 1202,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 1274,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 15,
+          "weights": {
+            "offset": 1278,
+            "length": 72,
+            "shape": [
+              8,
+              3,
+              3
+            ]
+          },
+          "full_bias": {
+            "offset": 1350,
+            "length": 4,
+            "shape": []
+          }
+        }
+      ],
+      "quantization": {
+        "approx_m": {
+          "offset": 1354,
+          "length": 64,
+          "shape": [
+            16
+          ]
+        },
+        "x_zero": {
+          "offset": 1418,
+          "length": 1,
+          "shape": []
+        },
+        "y_zero": {
+          "offset": 1419,
+          "length": 1,
+          "shape": []
+        }
+      }
+    },
+    {
+      "name": "classifier",
+      "type": "QuantizedLinear",
+      "offset": 1420,
+      "length": 7921,
+      "weight_shape": [
+        10,
+        784
+      ],
+      "kernels": [
+        {
+          "output_channel": 0,
+          "weights": {
+            "offset": 1420,
+            "length": 784,
+            "shape": [
+              784
+            ]
+          },
+          "full_bias": {
+            "offset": 2204,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 1,
+          "weights": {
+            "offset": 2208,
+            "length": 784,
+            "shape": [
+              784
+            ]
+          },
+          "full_bias": {
+            "offset": 2992,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 2,
+          "weights": {
+            "offset": 2996,
+            "length": 784,
+            "shape": [
+              784
+            ]
+          },
+          "full_bias": {
+            "offset": 3780,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 3,
+          "weights": {
+            "offset": 3784,
+            "length": 784,
+            "shape": [
+              784
+            ]
+          },
+          "full_bias": {
+            "offset": 4568,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 4,
+          "weights": {
+            "offset": 4572,
+            "length": 784,
+            "shape": [
+              784
+            ]
+          },
+          "full_bias": {
+            "offset": 5356,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 5,
+          "weights": {
+            "offset": 5360,
+            "length": 784,
+            "shape": [
+              784
+            ]
+          },
+          "full_bias": {
+            "offset": 6144,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 6,
+          "weights": {
+            "offset": 6148,
+            "length": 784,
+            "shape": [
+              784
+            ]
+          },
+          "full_bias": {
+            "offset": 6932,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 7,
+          "weights": {
+            "offset": 6936,
+            "length": 784,
+            "shape": [
+              784
+            ]
+          },
+          "full_bias": {
+            "offset": 7720,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 8,
+          "weights": {
+            "offset": 7724,
+            "length": 784,
+            "shape": [
+              784
+            ]
+          },
+          "full_bias": {
+            "offset": 8508,
+            "length": 4,
+            "shape": []
+          }
+        },
+        {
+          "output_channel": 9,
+          "weights": {
+            "offset": 8512,
+            "length": 784,
+            "shape": [
+              784
+            ]
+          },
+          "full_bias": {
+            "offset": 9296,
+            "length": 4,
+            "shape": []
+          }
+        }
+      ],
+      "quantization": {
+        "approx_m": {
+          "offset": 9300,
+          "length": 40,
+          "shape": [
+            10
+          ]
+        },
+        "y_zero": {
+          "offset": 9340,
+          "length": 1,
+          "shape": []
+        }
+      }
+    }
+  ]
+}
