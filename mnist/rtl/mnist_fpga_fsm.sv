@@ -146,6 +146,24 @@ module mnist_fpga_fsm (
         .output_pixel              (mnist_output_pixel)
     );
 
+    logic signed [ACTIVATION_BITS-1:0] flattened_last_layer [0:783];
+    logic [9:0] output_count;
+
+    always_ff @(posedge clk) begin
+        if (current_state == ST_IDLE || !rst_n) begin
+            for (int i = 0; i < 784; i++) begin
+                flattened_last_layer[i] <= '0;
+            end
+            output_count <= '0;
+        end
+        else if (mnist_output_valid) begin
+            output_count <= output_count + 1'b1;
+            for (int j = 0; j < 16; j++) begin
+                flattened_last_layer[32'(output_count) + 49*j] <= mnist_output_pixel[j];
+            end
+        end
+    end
+
 endmodule
 
 `endif  // _MNIST_FPGA_FSM_SV_
