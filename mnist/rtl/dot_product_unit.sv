@@ -24,12 +24,12 @@ module dot_product_unit #(
 );
 
     localparam int DOT_PRODUCT_BITS = ACTIVATION_BITS+WEIGHT_BITS+$clog2(ROW_WIDTH);
-    logic signed [ACTIVATION_BITS+WEIGHT_BITS-1:0] multiplies [0:N-1];
+    logic signed [ACTIVATION_BITS+WEIGHT_BITS-1:0] product [0:N-1];
 
     always_comb begin
         // Element-wise multiply
         for (int i = 0; i < N; i++) begin
-            multiplies[i] = activations[i] * weights[i];
+            product[i] = activations[i] * weights[i];
         end
     end
 
@@ -41,7 +41,7 @@ module dot_product_unit #(
         .IN_BITS (ACTIVATION_BITS+WEIGHT_BITS)
     ) tree_adder 
     (
-        .addends (multiplies),
+        .addends (product),
         .sum     (unpadded_dot_product)
     ); 
 
