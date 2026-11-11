@@ -1,7 +1,7 @@
 // ================================================================
 //
 // Date  : Nov 7, 2026
-// Author: Kaan Akan
+// Author: Kaan Akan, Ishaan Parikh
 //
 // FPGA top-level for the MNIST feature extractor. Instantiates the
 // mnist module with hardcoded picture inputs and an FSM that streams
@@ -32,7 +32,8 @@ module mnist_fpga_fsm (
     typedef enum logic [1:0] {
         ST_IDLE,
         ST_MNIST_BUSY,
-        ST_CONFIDENCE_CALC
+        ST_CONFIDENCE_CALC,
+        ST_DONE
     } state_t;
 
     state_t current_state, next_state;
@@ -148,8 +149,56 @@ module mnist_fpga_fsm (
         .output_pixel              (mnist_output_pixel)
     );
 
+    logic classifier_done;
+    assign classifier_done = 1'b1;
+
+    always_comb begin : next_state_logic
+        next_state = current_state;
+        case (current_state)
+            ST_IDLE: begin
+                next_state = ST_MNIST_BUSY;
+            end
+
+            ST_MNIST_BUSY: begin
+                if (mnist_done) begin
+                    next_state = ST_CONFIDENCE_CALC;
+                end
+            end
+
+            ST_CONFIDENCE_CALC: begin
+                if (classifier_done) begin
+                    next_state = ST_DONE;
+                end
+            end
+
+            ST_DONE: begin
+                next_state = ST_DONE;
+            end
+
+            default: next_state = ST_IDLE;
+        endcase
+    end
+
     logic signed [ACTIVATION_BITS-1:0] flattened_last_layer [0:783];
     logic [9:0] output_count;
+    //just generalizing, set to our image
+    localparam  int NUM_PIXELS = 28 * 28;
+    logic [$clog2(NUM_PIXELS+1)-1:0] pixel_count;
+
+    always_ff @(posedge clk) begin : pixel_counter
+     if (!rst_n || current_state == ST_IDLE) begin
+        pixel_count <= '0;
+
+     end 
+     else if (mnist_pixel_valid) begin
+        pixel_count <= pixel_count + 1'b1;
+     end
+    end
+
+    assign mnist_start          = (current_state == ST_IDLE);
+    assign mnist_pixel_valid    = (current_state == ST_MNIST_BUSY) && (pixel_count < NUM_PIXELS);
+    assign mnist_input_pixel[0] = input_pixels[pixel_count];
+    assign output_valid         = (current_state == ST_DONE);
 
     always_ff @(posedge clk) begin
         if (current_state == ST_IDLE || !rst_n) begin
@@ -165,6 +214,7 @@ module mnist_fpga_fsm (
             end
         end
     end
+
 
 endmodule
 
