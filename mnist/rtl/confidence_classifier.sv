@@ -130,7 +130,7 @@ module confidence_classifier #(
     end
 
     // Dot product units, in which one unit does the weight for each digit
-    for (genvar i = 0; i < (NUM_CLASSES); i++) begin
+    for (genvar i = 0; i < (NUM_CLASSES); i++) begin :generate_dot_product_units
         dot_product_unit #(
             .N         (N),
             .ROW_WIDTH (ROW_WIDTH)
@@ -143,10 +143,13 @@ module confidence_classifier #(
     end
 
     // Add intermediate dot products in binary tree and register result
-    logic signed [ACTIVATION_BITS+WEIGHT_BITS+$clog2(ROW_WIDTH)+$clog2(NUM_CHUNKS)-1:0] summed_results     [0:NUM_CLASSES-1];
-    logic signed [ACTIVATION_BITS+WEIGHT_BITS+$clog2(ROW_WIDTH)+$clog2(NUM_CHUNKS)-1:0] reg_summed_results [0:NUM_CLASSES-1];
+    localparam int SUM_BITS   = ACTIVATION_BITS + WEIGHT_BITS + $clog2(ROW_WIDTH) + $clog2(NUM_CHUNKS);
+    localparam int SCORE_BITS = (SUM_BITS + 1) + (SCALE_M_BITS + 1);
 
-    for (genvar k = 0; k < NUM_CLASSES; k++) begin
+    logic signed [SUM_BITS-1:0] summed_results     [0:NUM_CLASSES-1];
+    logic signed [SUM_BITS:0]   reg_summed_results [0:NUM_CLASSES-1];  // add one extra bit for the bias
+
+    for (genvar k = 0; k < NUM_CLASSES; k++) begin : generate_adders
         binary_tree_adder #(
             .N       (NUM_CHUNKS),
             .IN_BITS (ACTIVATION_BITS + WEIGHT_BITS + $clog2(ROW_WIDTH))
@@ -162,7 +165,18 @@ module confidence_classifier #(
             reg_summed_results <= '{default: '0};
         end
         else if (current_state == ST_ADDITION) begin
-            reg_summed_results <= summed_results;
+            for (int k = 0; k < NUM_CLASSES; k++) begin
+                reg_summed_results[k] <= summed_results[k] + (SUM_BITS+1)'(bias[k]);
+            end
+        end
+    end
+
+    // Scale each class's sum so they can be compared
+    logic signed [SCORE_BITS-1:0] scores [0:NUM_CLASSES-1];
+
+    always_comb begin
+        for (int k = 0; k < NUM_CLASSES; k++) begin
+            scores[k] = reg_summed_results[k] * $signed({1'b0, quant_scale_mult[k]});
         end
     end
 
@@ -172,13 +186,11 @@ module confidence_classifier #(
     always_comb begin
         best_class = '0;
         for (int k = 1; k < NUM_CLASSES; k++) begin
-            if (reg_summed_results[k] > reg_summed_results[best_class]) begin
+            if (scores[k] > scores[best_class]) begin
                 best_class = 4'(k);
             end
         end
     end
-
-
 
 endmodule
 
